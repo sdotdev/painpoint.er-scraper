@@ -1,8 +1,3 @@
-#!/usr/bin/env python3
-"""
-Data Analyzer module for PainPoint.er Search
-Enhanced version for more robust analysis and idea generation.
-"""
 import json
 import re
 import datetime
@@ -16,9 +11,9 @@ from typing import Dict, List, Optional, Tuple, Counter, Any, Set
 # Optional dependency handling
 try:
     import spacy
-    # Suggest downloading the small English model if spacy is installed
     try:
         NLP = spacy.load("en_core_web_sm")
+        logging.info("spaCy model 'en_core_web_sm' loaded successfully.")
     except OSError:
         logging.warning("spaCy model 'en_core_web_sm' not found. "
                         "Run 'python -m spacy download en_core_web_sm' for better software name extraction. "
@@ -44,26 +39,21 @@ except ImportError:
         def __init__(self, text):
             self.sentiment = DummySentiment()
 
-    TextBlob = DummyTextBlob
+    TextBlob = DummyTextBlob # type: ignore # Assign dummy class
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- Constants ---
-# Keywords hinting that a nearby capitalized word might be a software product
 SOFTWARE_CONTEXT_KEYWORDS = {
     'app', 'tool', 'software', 'platform', 'service', 'api', 'sdk',
     'library', 'framework', 'website', 'program', 'system', 'crm',
     'erp', 'saas', 'extension', 'plugin', 'bot', 'database', 'editor'
 }
-# Regex for potential software names (Capitalized, potentially with numbers, dots, or specific endings)
-# Handles multi-word capitalized names like "Google Docs" or single names like "Figma"
 POTENTIAL_SOFTWARE_REGEX = re.compile(
     r'\b([A-Z][a-zA-Z0-9]*(?:[.\s-][A-Z][a-zA-Z0-9]*)*' # Multi-word like "Google Cloud" or "VS Code"
     r'(?:\.js|\.ai|\.io|\.app)?'                       # Optional common endings
     r')\b'
 )
-
-# Keywords for Pain Points / Feature Requests
 PAIN_POINT_KEYWORDS = {
     'critical': ['crash', 'bug', 'error', 'broken', 'unusable', 'terrible', 'awful', 'hate', 'fail', 'freeze', 'exploit', 'vulnerability', 'inconsistent'],
     'major': ['slow', 'frustrating', 'annoying', 'expensive', 'complicated', 'difficult', 'confusing', 'lag', 'unreliable', 'poor', 'security', 'privacy'],
@@ -76,110 +66,181 @@ ALL_ISSUE_KEYWORDS = {k: v for d in [PAIN_POINT_KEYWORDS, FEATURE_REQUEST_KEYWOR
 
 
 class DataAnalyzer:
-    "Analyze scraped data to identify pain points, features, and opportunities."
+    """Analyze scraped data to identify pain points, features, and opportunities."""
 
     def __init__(self, api_key: Optional[str] = None, api_type: str = 'gemini'):
+        """
+        Initializes the DataAnalyzer.
+
+        Args:
+            api_key: Optional API key for AI services (Gemini, OpenAI, Anthropic).
+            api_type: The type of AI service to use ('gemini', 'openai', 'anthropic'). Defaults to 'gemini'.
+        """
         self.api_key = api_key
-        self.api_type = api_type
-        # Use TextBlob for simple sentiment, could be replaced with a more sophisticated model
+        self.api_type = api_type.lower() # Ensure lowercase for comparisons
         self.sentiment_analyzer = TextBlob
-        self.genai = None # Ensure genai is initialized properly
-        self.genai_client = None
-        self.openai = None
-        self.anthropic_client = None
+        self.genai = None # Stores the configured google.generativeai module (if using configure)
+        self.genai_client = None # Stores the google.generativeai.Client instance (if using Client)
+        self.openai = None # Stores the OpenAI client module/object
+        self.anthropic_client = None # Stores the Anthropic client instance
+
+        # Stores demand metrics calculated during analysis for potential reuse by AI insights
+        self.demand_metrics: Dict[str, Any] = {}
 
         if self.api_key:
             self._setup_ai_connection()
+        else:
+             logging.info("No API key provided. AI features (software extraction assist, idea generation, insights) will be disabled.")
+
 
     def _setup_ai_connection(self):
-        "Set up connection to AI API."
-        # DO NOT CHANGE GEMINI API SETUP PER USER REQUEST
-        if self.api_type == 'gemini' and self.api_key:
+        """Set up connection to the specified AI API."""
+        logging.info(f"Attempting to set up AI connection for: {self.api_type}")
+
+        # --- Gemini Setup ---
+        # Handles both genai.Client (newer) and genai.configure (older) initialization methods.
+        if self.api_type == 'gemini':
+            if not self.api_key:
+                logging.warning("Gemini API key missing. Cannot initialize Gemini.")
+                return
             try:
-                from google import genai
-                # Assuming the user passes a configured client or key appropriately
-                # Let's refine this slightly to handle potential client vs key init
+                # Dynamically import 'google.generativeai' only when needed
+                import google.generativeai as genai
+                self.genai = genai # Store module reference
+
+                # Try initializing using the Client API (preferred)
                 try:
-                    # Attempt to initialize client directly if genai has Client attribute
-                    if hasattr(genai, 'Client'):
-                         self.genai_client = genai.Client(api_key=self.api_key) # Preferred if Client exists
-                         self.genai = genai # Store the module
-                         logging.info('Google Gemini AI client initialized successfully using Client.')
+                    # Check if the Client class exists in the imported module
+                    if hasattr(genai, 'GenerativeModel') or hasattr(genai, 'Client'): # Check for common client/model classes
+                        # Note: Modern library uses GenerativeModel usually, but check Client for broader compatibility.
+                        # Configuration is often done globally via configure, then model instantiated.
+                        # Let's prioritize configure as it's simpler and common.
+                        genai.configure(api_key=self.api_key)
+                        logging.info("Google Gemini AI configured successfully using genai.configure().")
+                        # We don't create a client instance here, rely on configure + model instantiation later.
+                        # Set genai_client to None to ensure later calls use the configure path.
+                        self.genai_client = None
+
                     else:
-                         # Fallback or alternative initialization (keep existing logic if needed)
-                         genai.configure(api_key=self.api_key)
-                         self.genai = genai # Store the module
-                         # Create a model instance for generate_content if Client wasn't used
-                         # Note: The original code called genai.models.generate_content,
-                         # implying genai.models exists. If Client API is used, calls
-                         # might be like self.genai_client.generate_content(...)
-                         # We need to ensure compatibility with how it's called later.
-                         # The current calls use `self.genai.models.generate_content` or `self.genai_client.generate_content`
-                         # Let's ensure self.genai_client is set if possible. If not, rely on genai.configure
-                         if not self.genai_client:
-                              # If Client wasn't available, ensure genai itself is configured
-                              logging.info('Google Gemini AI configured successfully using API key.')
-                              # We might need a model instance if Client isn't used.
-                              # Let's assume the later calls adapt or the user's env uses the configure method.
+                         # Fallback if configure is somehow unavailable but Client exists (less common)
+                         # This path is less likely with current library versions.
+                         logging.warning("genai.configure() not found or failed, attempting genai.Client() initialization (less common).")
+                         if hasattr(genai, 'Client'):
+                             self.genai_client = genai.Client(api_key=self.api_key)
+                             logging.info('Google Gemini AI client initialized successfully using genai.Client().')
+                         else:
+                             raise AttributeError("Neither genai.configure nor genai.Client seems available.")
 
                 except Exception as e:
-                     logging.error(f"Failed to initialize Google Gemini AI: {e}. Please check API key and configuration.")
-                     self.genai = None
-                     self.genai_client = None
+                    logging.error(f"Failed to initialize Google Gemini AI: {e}. "
+                                  "Ensure 'google-generativeai' is installed and API key is valid. "
+                                  "Check Google Cloud project permissions if applicable.")
+                    self.genai = None # Nullify on error
+                    self.genai_client = None
 
             except ImportError:
-                logging.error("Google Generative AI SDK not found. Please install it: pip install google-generativeai")
+                logging.error("Google Generative AI SDK ('google-generativeai') not found. "
+                              "Please install it: pip install google-generativeai")
                 self.genai = None
                 self.genai_client = None
+            except Exception as e: # Catch any other unexpected errors during import/setup
+                 logging.error(f"An unexpected error occurred during Gemini setup: {e}")
+                 self.genai = None
+                 self.genai_client = None
 
-        # --- Other API setups (unchanged functionality) ---
-        elif self.api_type == 'openai' and self.api_key:
+
+        # --- OpenAI Setup ---
+        elif self.api_type == 'openai':
+            if not self.api_key:
+                logging.warning("OpenAI API key missing. Cannot initialize OpenAI.")
+                return
             try:
                 import openai
-                openai.api_key = self.api_key
-                self.openai = openai
+                # Use the modern client initialization
+                self.openai = openai.OpenAI(api_key=self.api_key)
                 logging.info('OpenAI client initialized successfully.')
+                # Test connection lightly (optional, remove if causes issues)
+                # try:
+                #     self.openai.models.list()
+                #     logging.info("OpenAI connection successful (listed models).")
+                # except Exception as conn_err:
+                #     logging.warning(f"Could not confirm OpenAI connection via models.list: {conn_err}")
+
             except ImportError:
-                logging.error("OpenAI library not found. Please install it: pip install openai")
+                logging.error("OpenAI library ('openai') not found. Please install it: pip install openai")
+                self.openai = None
             except Exception as e:
-                logging.error(f"Failed to initialize OpenAI: {e}")
-        elif self.api_type == 'anthropic' and self.api_key:
+                logging.error(f"Failed to initialize OpenAI: {e}. Check API key and library version.")
+                self.openai = None
+
+        # --- Anthropic Setup ---
+        elif self.api_type == 'anthropic':
+            if not self.api_key:
+                logging.warning("Anthropic API key missing. Cannot initialize Anthropic.")
+                return
             try:
                 import anthropic
                 self.anthropic_client = anthropic.Anthropic(api_key=self.api_key)
                 logging.info('Anthropic client initialized successfully.')
+                 # Test connection lightly (optional)
+                # try:
+                #     # A simple operation like creating a small message could test auth
+                #     self.anthropic_client.messages.create(max_tokens=1, model="claude-3-haiku-20240307", messages=[{"role":"user", "content":"test"}])
+                #     logging.info("Anthropic connection successful (test message created).")
+                # except Exception as conn_err:
+                #      logging.warning(f"Could not confirm Anthropic connection via test message: {conn_err}")
+
             except ImportError:
-                logging.error("Anthropic library not found. Please install it: pip install anthropic")
+                logging.error("Anthropic library ('anthropic') not found. Please install it: pip install anthropic")
+                self.anthropic_client = None
             except Exception as e:
-                logging.error(f"Failed to initialize Anthropic: {e}")
+                logging.error(f"Failed to initialize Anthropic: {e}. Check API key.")
+                self.anthropic_client = None
+
+        else:
+             logging.error(f"Unsupported API type: '{self.api_type}'. Choose 'gemini', 'openai', or 'anthropic'.")
+
 
     def analyze_data(self, scraped_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        "Analyze scraped data to identify pain points and opportunities."
+        """
+        Analyze scraped data to identify pain points, features, opportunities, etc.
+
+        Args:
+            scraped_data: A list of dictionaries, where each dictionary represents
+                          a scraped data point (e.g., a post, comment). Expected
+                          keys might include 'platform', 'title', 'post_content',
+                          'comments', 'timestamp', 'url', 'upvotes', etc.
+
+        Returns:
+            A dictionary containing various analysis results.
+        """
         if not scraped_data:
             logging.warning("No data provided for analysis.")
             return self._empty_analysis_results()
 
         logging.info(f"Starting analysis on {len(scraped_data)} data points.")
+
+        # --- Core Analysis Steps ---
         all_text = self._combine_text_data(scraped_data)
         logging.info(f"Combined text length: {len(all_text)} characters.")
 
         software_mentions_detailed = self._extract_software_mentions(all_text, scraped_data)
-        logging.info(f"Identified {len(software_mentions_detailed)} potential software products.")
+        logging.info(f"Identified {len(software_mentions_detailed)} distinct software products (meeting threshold).")
 
-        # Extract both pain points and feature requests
         issues = self._extract_pain_points_and_features(software_mentions_detailed)
         pain_points_data = [item for item in issues if item['type'] == 'pain_point']
         feature_requests_data = [item for item in issues if item['type'] == 'feature_request']
-        logging.info(f"Extracted {sum(len(p['issues']) for p in pain_points_data)} pain points across {len(pain_points_data)} software.")
-        logging.info(f"Extracted {sum(len(f['issues']) for f in feature_requests_data)} feature requests across {len(feature_requests_data)} software.")
+        logging.info(f"Extracted {sum(p['pain_point_summary']['count'] for p in pain_points_data)} pain points across {len(pain_points_data)} software items.")
+        logging.info(f"Extracted {sum(f['feature_request_summary']['count'] for f in feature_requests_data)} feature requests across {len(feature_requests_data)} software items.")
 
-        # Use the detailed mentions list which includes context for further analysis
+        # Prepare simplified list for output, but use detailed list internally
         software_names_with_mentions = [{'name': s['name'], 'mentions': s['mentions']} for s in software_mentions_detailed]
 
         sentiment_analysis = self._analyze_sentiment(software_mentions_detailed)
         logging.info("Completed sentiment analysis.")
 
-        demand_metrics = self._calculate_demand_metrics(scraped_data, software_mentions_detailed, sentiment_analysis)
+        # Calculate demand metrics and store them in the instance variable for potential use in AI insights
+        self.demand_metrics = self._calculate_demand_metrics(scraped_data, software_mentions_detailed, sentiment_analysis)
         logging.info("Calculated demand metrics.")
 
         statistical_analysis = self._perform_statistical_analysis(scraped_data, software_mentions_detailed, issues)
@@ -188,31 +249,52 @@ class DataAnalyzer:
         trend_analysis = self._detect_trends(scraped_data, software_mentions_detailed, issues)
         logging.info("Detected trends.")
 
-        # Pass both pain points and feature requests to idea generation
-        product_ideas = self._generate_product_ideas(pain_points_data, feature_requests_data, demand_metrics, statistical_analysis.get('co_occurrence', {}))
-        logging.info(f"Generated {len(product_ideas)} product ideas.")
+        # Generate product ideas using extracted issues and metrics
+        product_ideas = self._generate_product_ideas(
+            pain_points_data,
+            feature_requests_data,
+            self.demand_metrics, # Pass the calculated metrics
+            statistical_analysis.get('co_occurrence', {})
+        )
+        logging.info(f"Generated {len(product_ideas)} product ideas (AI + fallback).")
 
+        # --- AI Summary Insights (Optional) ---
         ai_insights = {}
-        # Use the primary analysis results as input for AI summary
-        if self.api_key and (self.genai_client or self.genai or self.openai or self.anthropic_client):
-            logging.info("Generating AI insights summary...")
-            ai_insights = self._generate_ai_insights(
-                software_names_with_mentions, # Pass simplified list here
-                pain_points_data,
-                feature_requests_data,
-                sentiment_analysis,
-                statistical_analysis
-            )
-            logging.info("AI insights generation complete.")
+        # Check if any AI client was successfully initialized
+        if self.api_key and (self.genai or self.genai_client or self.openai or self.anthropic_client):
+            logging.info(f"Generating AI insights summary using {self.api_type}...")
+            try:
+                ai_insights = self._generate_ai_insights(
+                    software_mentions_detailed, # Pass detailed list for better AI context
+                    pain_points_data,
+                    feature_requests_data,
+                    sentiment_analysis,
+                    statistical_analysis
+                    # self.demand_metrics is accessed via self within _generate_ai_insights
+                )
+                if 'error' not in ai_insights:
+                     logging.info("AI insights generation complete.")
+                else:
+                     logging.warning(f"AI insights generation failed: {ai_insights.get('error', 'Unknown reason')}")
+            except Exception as ai_err:
+                 logging.error(f"An unexpected error occurred during AI insights generation: {ai_err}", exc_info=True)
+                 ai_insights = {'error': f"Unexpected error during AI insights generation: {str(ai_err)}"}
         else:
-            logging.info("Skipping AI insights generation (no API key or client).")
+            logging.info("Skipping AI insights generation (API key or client not available/initialized).")
 
-
+        # --- Compile Final Results ---
         return {
-            'software_mentions': software_names_with_mentions, # Return simplified list as before
+            'summary': {
+                'total_data_points': len(scraped_data),
+                'total_software_identified': len(software_mentions_detailed),
+                'total_pain_points': sum(p['pain_point_summary']['count'] for p in pain_points_data),
+                'total_feature_requests': sum(f['feature_request_summary']['count'] for f in feature_requests_data),
+                'product_ideas_generated': len(product_ideas),
+            },
+            'software_mentions': software_names_with_mentions, # Simplified list for output
             'pain_points': pain_points_data,
-            'feature_requests': feature_requests_data, # Added feature requests
-            'demand_metrics': demand_metrics,
+            'feature_requests': feature_requests_data,
+            'demand_metrics': self.demand_metrics, # Use the stored metrics
             'sentiment_analysis': sentiment_analysis,
             'statistical_analysis': statistical_analysis,
             'trend_analysis': trend_analysis,
@@ -223,48 +305,60 @@ class DataAnalyzer:
     def _empty_analysis_results(self) -> Dict[str, Any]:
         """Returns a dictionary with empty results for all analysis keys."""
         return {
-            'software_mentions': [], 'pain_points': [], 'feature_requests': [],
+            'summary': {}, 'software_mentions': [], 'pain_points': [], 'feature_requests': [],
             'demand_metrics': {}, 'sentiment_analysis': {}, 'statistical_analysis': {},
             'trend_analysis': {}, 'product_ideas': [], 'ai_insights': {}
         }
 
     def _combine_text_data(self, scraped_data: List[Dict[str, Any]]) -> str:
-        "Combine all relevant text data from scraped sources."
-        # Use a list and join later for slightly better performance on very large datasets
+        """Combine all relevant text fields from a list of scraped data items."""
         text_parts = []
         for data in scraped_data:
-            platform = data.get('platform', 'unknown')
-            # Extract text more robustly, handling missing keys gracefully
+            # Extract text robustly, handling missing keys gracefully
             title = data.get('title', '')
-            post_content = data.get('post_content', data.get('description', data.get('tweet_content', data.get('content', ''))))
+            # Common keys for main content across different platforms
+            post_content = data.get('post_content', data.get('description',
+                                    data.get('tweet_content', data.get('body', data.get('content', '')))))
+            # Common keys for comments/replies
             comments_list = data.get('comments', data.get('replies', []))
 
+            # Append non-empty text parts with labels for clarity
             if title: text_parts.append(f"TITLE: {title}")
-            if post_content: text_parts.append(f"CONTENT: {post_content}") # Use generic 'CONTENT'
+            if post_content: text_parts.append(f"CONTENT: {post_content}")
 
             for i, comment in enumerate(comments_list):
-                comment_text = comment.get('text', '')
+                # Handle cases where comment is a string or a dict
+                comment_text = ''
+                if isinstance(comment, dict):
+                    comment_text = comment.get('text', comment.get('body', ''))
+                elif isinstance(comment, str):
+                    comment_text = comment
+
                 if comment_text:
-                    # Add comment number for potential context tracking if needed later
                     text_parts.append(f"COMMENT_{i+1}: {comment_text}")
 
-        # Add separators to prevent words from merging across different data points
-        return "\n\n".join(text_parts)
+        # Join parts with double newline to ensure separation
+        return "\n\n".join(filter(None, text_parts)) # Filter out potential empty strings
 
     def _extract_software_mentions(self, text: str, scraped_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Extract mentions of software products using AI (if available) or NER/Regex fallback.
-        Returns a detailed list including context.
+        Returns a detailed list including context and mention count, filtered by minimum mentions.
         """
         mentioned_software: Dict[str, Dict[str, Any]] = {}
-        max_ai_text_length = 30000 # Allow longer context for better AI identification
-
-        # 1. Attempt AI Extraction (No change to Gemini call logic)
         ai_identified_names: Set[str] = set()
-        if self.api_key and (self.genai_client or self.genai or self.openai or self.anthropic_client):
+        max_ai_text_length = 30000 # Limit context for AI prompt to avoid excessive length/cost
+        ai_available = bool(self.api_key and (self.genai or self.genai_client or self.openai or self.anthropic_client))
+
+        # 1. Attempt AI Extraction (if available)
+        if ai_available:
             try:
-                logging.info("Attempting software extraction using AI...")
+                logging.info(f"Attempting software extraction using AI ({self.api_type})...")
+                # Truncate text if it exceeds the limit
                 text_sample = text[:max_ai_text_length] if len(text) > max_ai_text_length else text
+                if len(text) > max_ai_text_length:
+                     logging.warning(f"Input text truncated to {max_ai_text_length} chars for AI software extraction.")
+
                 ai_prompt = f"""
                 Analyze the following text from online discussions (Reddit, Twitter, YouTube, Product Hunt etc.)
                 and identify all specific software products, applications, tools, libraries, frameworks, APIs, or platforms mentioned.
@@ -285,49 +379,45 @@ class DataAnalyzer:
                 """
 
                 raw_ai_output = None
-                if self.api_type == 'gemini' and (self.genai_client or self.genai):
-                     # Determine which Gemini object to use based on initialization
-                    if self.genai_client and hasattr(self.genai_client, 'generate_content'):
-                         # Use the Client API if available
-                         # Ensure model name is appropriate, adjust if needed (e.g., 'gemini-1.5-flash' etc.)
-                         # NOTE: User requested gemini-2.0-flash. This model might not exist or have different capabilities.
-                         # Stick to user's request but log a warning if issues arise.
-                         # Using a model known for robust generation might be better, like gemini-1.5-pro if available.
-                         # For now, stick to the user's specified model.
-                         # Check if 'gemini-2.0-flash' is a valid model identifier in the user's context.
-                         # If it causes errors, suggest 'gemini-1.5-flash' or 'gemini-pro'.
-                         logging.warning("Using model 'gemini-2.0-flash' as specified. If errors occur, consider 'gemini-1.5-flash' or 'gemini-pro'.")
-                         response = self.genai_client.generate_content(model='models/gemini-1.5-flash-latest', contents=ai_prompt) # Use a potentially more reliable model identifier
-                         raw_ai_output = response.text
-                    elif self.genai and hasattr(self.genai, 'models') and hasattr(self.genai.models, 'generate_content'):
-                         # Fallback to legacy(?) `genai.models.generate_content` if Client wasn't used/available
-                         # This preserves the original code's call structure if needed.
-                         logging.warning("Using model 'gemini-2.0-flash' via genai.models.generate_content as specified.")
-                         response = self.genai.models.generate_content(model='models/gemini-1.5-flash-latest', contents=ai_prompt) # Match model identifier
-                         raw_ai_output = response.text
+                model_to_use = 'models/gemini-1.5-flash-latest' # Default Gemini model
+
+                # --- AI Call Logic ---
+                if self.api_type == 'gemini' and (self.genai or self.genai_client):
+                    # Prioritize configured genai module (uses global configure)
+                    if self.genai and hasattr(self.genai, 'GenerativeModel'):
+                        logging.info(f"Using Gemini model '{model_to_use}' via configured genai module.")
+                        model = self.genai.GenerativeModel(model_to_use)
+                        response = model.generate_content(ai_prompt)
+                        raw_ai_output = response.text
+                    # Fallback to client instance if that was initialized instead (less common now)
+                    elif self.genai_client and hasattr(self.genai_client, 'generate_content'):
+                        logging.warning(f"Using Gemini model '{model_to_use}' via genai.Client instance (less common).")
+                        response = self.genai_client.generate_content(model=model_to_use, contents=ai_prompt) # Adjust call signature if needed
+                        raw_ai_output = response.text
                     else:
-                         logging.error("Gemini AI object not configured correctly for content generation.")
+                        logging.error("Gemini AI object (genai module or client) not configured correctly for content generation.")
 
                 elif self.api_type == 'openai' and self.openai:
-                     # Use a model known for JSON output reliability
+                     logging.info("Using OpenAI model 'gpt-4o-mini'.")
                      response = self.openai.chat.completions.create(
-                         model='gpt-4o-mini', # Use a cost-effective but capable model
+                         model='gpt-4o-mini', # Cost-effective and capable model
                          response_format={'type': 'json_object'},
                          messages=[
                              {'role': 'system', 'content': 'You extract software names from text and return a JSON array of strings.'},
                              {'role': 'user', 'content': ai_prompt}
                          ]
                      )
-                     # OpenAI's json_object mode should return valid JSON directly
                      raw_ai_output = response.choices[0].message.content
 
                 elif self.api_type == 'anthropic' and self.anthropic_client:
+                     logging.info("Using Anthropic model 'claude-3-haiku-20240307'.")
                      response = self.anthropic_client.messages.create(
-                         model='claude-3-haiku-20240307', # Use a fast and cost-effective model
+                         model='claude-3-haiku-20240307', # Fast and cost-effective model
                          max_tokens=1000,
                          messages=[{'role': 'user', 'content': ai_prompt}]
                      )
                      raw_ai_output = response.content[0].text
+                # --- End AI Call Logic ---
 
                 if raw_ai_output:
                     # Extract JSON array from the response (handle potential markdown/text wrapping)
@@ -336,212 +426,275 @@ class DataAnalyzer:
                         try:
                             software_list = json.loads(json_match.group(0))
                             if isinstance(software_list, list) and all(isinstance(item, str) for item in software_list):
-                                ai_identified_names.update(name.strip() for name in software_list if name.strip())
-                                logging.info(f"AI identified {len(ai_identified_names)} software names.")
+                                ai_identified_names.update(name.strip() for name in software_list if name.strip() and len(name.strip()) > 1) # Add basic length filter
+                                logging.info(f"AI identified {len(ai_identified_names)} potential software names.")
+                            else:
+                                logging.warning(f"AI response JSON was not a list of strings: {software_list}")
                         except json.JSONDecodeError as e:
-                            logging.warning(f"AI response was not valid JSON: {e}. Raw output: {raw_ai_output[:200]}...")
+                            logging.warning(f"AI response was not valid JSON: {e}. Raw output starts with: {raw_ai_output[:200]}...")
                     else:
-                        logging.warning(f"Could not find JSON array in AI response. Raw output: {raw_ai_output[:200]}...")
+                        logging.warning(f"Could not find JSON array '[]' in AI response. Raw output starts with: {raw_ai_output[:200]}...")
+                else:
+                    logging.warning(f"AI ({self.api_type}) returned no output for software extraction.")
 
             except Exception as e:
                 logging.error(f"Error during AI software extraction ({self.api_type}): {e}", exc_info=True)
+                # Continue with fallback methods even if AI fails
 
-        # 2. Fallback/Augmentation: Use NER and Regex if AI failed or to supplement
-        logging.info("Running NER/Regex fallback for software extraction...")
+        # 2. Fallback/Augmentation: Use NER and Regex
+        logging.info("Running NER/Regex fallback/augmentation for software extraction...")
         fallback_identified_names: Counter[str] = collections.Counter()
         context_map: Dict[str, List[str]] = collections.defaultdict(list)
+        processed_text_fallback = text # Use full text for fallback
 
         # Use spaCy NER if available
         if NLP:
             try:
-                doc = NLP(text[:1000000]) # Process a large chunk, but cap to avoid memory issues
-                possible_entities = [ent.text for ent in doc.ents if ent.label_ in ['PRODUCT', 'ORG']]
+                # Process in chunks if text is very long to avoid memory issues
+                max_spacy_len = 1_000_000
+                if len(processed_text_fallback) > max_spacy_len:
+                     logging.warning(f"Text length > {max_spacy_len}, processing only the start for spaCy NER.")
+                     processed_text_fallback = processed_text_fallback[:max_spacy_len]
+
+                doc = NLP(processed_text_fallback)
+                possible_entities = [ent.text.strip() for ent in doc.ents if ent.label_ in ['PRODUCT', 'ORG']]
                 logging.info(f"spaCy NER found {len(possible_entities)} potential PRODUCT/ORG entities.")
-                # Further filter based on context keywords
-                for entity in possible_entities:
-                    # Check if the entity itself looks like software (e.g., not just 'Apple' the company)
-                     if len(entity) > 1 and (entity[0].isupper() or any(c.isdigit() for c in entity)): # Basic check
-                          # Find mentions and check context
-                          try:
-                               for match in re.finditer(r'\b' + re.escape(entity) + r'\b', text, re.IGNORECASE):
-                                    start = max(0, match.start() - 50)
-                                    end = min(len(text), match.end() + 50)
-                                    context_snippet = text[start:end].lower()
-                                    if any(keyword in context_snippet for keyword in SOFTWARE_CONTEXT_KEYWORDS):
-                                         # Normalize common variations slightly (e.g., lowercase, remove trailing dots)
-                                         normalized_name = entity.strip().rstrip('.')
-                                         fallback_identified_names[normalized_name] += 1
-                                         if len(context_map[normalized_name]) < 15: # Store limited context
-                                            context_map[normalized_name].append(text[start:end].replace('\n', ' ').strip())
-                                         break # Count once per entity type found in relevant context
-                          except re.error:
-                              logging.warning(f"Regex error processing entity: {entity}")
-                              continue # Skip this entity if regex fails
+
+                # Filter entities based on capitalization, length, and context
+                for entity in set(possible_entities): # Use set to avoid redundant checks for same entity text
+                    if len(entity) > 1 and (entity[0].isupper() or any(c.isdigit() for c in entity)):
+                        # Find matches and check context keywords
+                        try:
+                            # Use regex finditer for context checking
+                            pattern = r'\b' + re.escape(entity) + r'\b'
+                            for match in re.finditer(pattern, processed_text_fallback, re.IGNORECASE):
+                                start = max(0, match.start() - 75) # Slightly wider context window
+                                end = min(len(processed_text_fallback), match.end() + 75)
+                                context_snippet = processed_text_fallback[start:end].lower()
+                                if any(keyword in context_snippet for keyword in SOFTWARE_CONTEXT_KEYWORDS):
+                                    normalized_name = entity.rstrip('.') # Basic normalization
+                                    fallback_identified_names[normalized_name] += 1
+                                    # Store context only if needed for debugging, might remove later
+                                    # if len(context_map[normalized_name]) < 5:
+                                    #    context_map[normalized_name].append(processed_text_fallback[start:end].replace('\n', ' ').strip())
+                                    break # Count once per unique entity text found in relevant context
+                        except re.error:
+                            logging.warning(f"Regex error processing spaCy entity: {entity}")
+                            continue # Skip this entity if regex fails
             except Exception as e:
-                logging.error(f"Error during spaCy NER processing: {e}")
+                logging.error(f"Error during spaCy NER processing: {e}", exc_info=True)
 
         # Use Regex as a further fallback or supplement
         try:
-            for match in POTENTIAL_SOFTWARE_REGEX.finditer(text):
+            for match in POTENTIAL_SOFTWARE_REGEX.finditer(text): # Use original full text for regex
                 potential_name = match.group(1).strip().rstrip('.')
-                # Basic filtering: length > 1, not purely numeric, avoid very common words if needed
-                if len(potential_name) > 1 and not potential_name.isdigit() and potential_name.lower() not in ['API', 'SDK', 'AI', 'ML', 'UI', 'UX']:
-                    # Check context
-                    start = max(0, match.start() - 50)
-                    end = min(len(text), match.end() + 50)
+                # Basic filtering: length > 1, not purely numeric, avoid common acronyms/words likely not software
+                common_non_software = {'API', 'SDK', 'AI', 'ML', 'UI', 'UX', 'IT', 'CEO', 'CTO', 'PM'}
+                if len(potential_name) > 1 and \
+                   not potential_name.isdigit() and \
+                   potential_name.upper() not in common_non_software and \
+                   potential_name.lower() not in SOFTWARE_CONTEXT_KEYWORDS: # Avoid matching keywords themselves
+                    # Check context around the regex match
+                    start = max(0, match.start() - 75)
+                    end = min(len(text), match.end() + 75)
                     context_snippet = text[start:end].lower()
-                    if any(keyword in context_snippet for keyword in SOFTWARE_CONTEXT_KEYWORDS):
-                        # Check if already found by NER with higher confidence, maybe prioritize NER?
-                        # For now, just add counts.
-                         fallback_identified_names[potential_name] += 1
-                         if len(context_map[potential_name]) < 15:
-                            context_map[potential_name].append(text[start:end].replace('\n', ' ').strip())
+                    # Require context keyword OR check if name ends with common software suffix
+                    has_context_keyword = any(keyword in context_snippet for keyword in SOFTWARE_CONTEXT_KEYWORDS)
+                    has_suffix = any(potential_name.lower().endswith(suffix) for suffix in ['.js', '.ai', '.io', '.app', 'db'])
+
+                    if has_context_keyword or has_suffix:
+                        fallback_identified_names[potential_name] += 1
+                        # Store context only if needed
+                        # if len(context_map[potential_name]) < 5:
+                        #    context_map[potential_name].append(text[start:end].replace('\n', ' ').strip())
         except Exception as e:
-            logging.error(f"Error during Regex software extraction: {e}")
+            logging.error(f"Error during Regex software extraction: {e}", exc_info=True)
 
         logging.info(f"Fallback methods identified {len(fallback_identified_names)} potential names with counts.")
 
-        # 3. Consolidate Results
-        # Start with AI identified names, give them an initial count of 1 or more if possible
-        for name in ai_identified_names:
-            if name not in mentioned_software:
-                 mentioned_software[name] = {'name': name, 'mentions': 0, 'context': []} # Initialize count
-
-        # Add counts and context from fallback methods (NER/Regex)
-        # We need to re-scan the text to get accurate counts for *all* identified names (AI + Fallback)
-        # And associate context properly.
-        final_candidates = set(mentioned_software.keys()) | set(fallback_identified_names.keys())
+        # 3. Consolidate Results & Recalculate Mentions with Context
+        # Combine candidates from AI and Fallback methods
+        final_candidates = ai_identified_names.union(fallback_identified_names.keys())
         logging.info(f"Consolidating {len(final_candidates)} unique candidate names.")
 
-        # Recalculate mentions and gather context across the entire dataset for all candidates
-        final_mentions: Dict[str, Dict[str, Any]] = collections.defaultdict(lambda: {'name': '', 'mentions': 0, 'context': []})
+        # Recalculate mentions and gather context accurately across the entire structured dataset
+        final_mentions_data: Dict[str, Dict[str, Any]] = collections.defaultdict(
+            lambda: {'name': '', 'mentions': 0, 'context': []}
+        )
 
-        # Use the structured scraped_data for context gathering
+        # Iterate through the original structured data for accurate counting and context association
         for data_item in scraped_data:
             item_text = self._combine_text_data([data_item]) # Get text for this specific item
+            if not item_text: continue # Skip if item has no text content
+
             item_url = data_item.get('url', 'N/A')
+            timestamp = data_item.get('timestamp', 'N/A') # Get timestamp if available
+
             for name in final_candidates:
-                 # Use case-insensitive matching, ensure word boundaries
-                 try:
-                     # Escape special regex characters in the name itself
-                     escaped_name = re.escape(name)
-                     # Add variations? e.g., 'VS Code' vs 'VSCode'. For now, exact boundary match.
-                     pattern = re.compile(r'\b' + escaped_name + r'\b', re.IGNORECASE)
-                     matches = list(pattern.finditer(item_text))
-                     if matches:
-                         # Increment count only once per data item to avoid overcounting within a single post/comment
-                         # To get total occurrences, use `len(matches)` instead of `+= 1`
-                         # Let's count total occurrences for better weighting
-                         mention_count_in_item = len(matches)
-                         if mention_count_in_item > 0:
-                              final_mentions[name]['name'] = name # Ensure name is set
-                              final_mentions[name]['mentions'] += mention_count_in_item
-                              # Add context from the first match in this item
-                              if len(final_mentions[name]['context']) < 15: # Limit stored context examples
-                                   match_obj = matches[0]
-                                   start = max(0, match_obj.start() - 100)
-                                   end = min(len(item_text), match_obj.end() + 100)
-                                   context_str = item_text[start:end].replace('\n', ' ').strip()
-                                   # Include source URL if available
-                                   final_mentions[name]['context'].append(f"{context_str} (Source: {item_url})")
+                try:
+                    # Use word boundaries and case-insensitive matching
+                    escaped_name = re.escape(name)
+                    pattern = re.compile(r'\b' + escaped_name + r'\b', re.IGNORECASE)
+                    matches = list(pattern.finditer(item_text))
 
-                 except re.error:
-                     logging.warning(f"Regex error searching for software name: {name}")
-                     continue
+                    if matches:
+                        mention_count_in_item = len(matches)
+                        final_mentions_data[name]['name'] = name # Ensure name is set
+                        final_mentions_data[name]['mentions'] += mention_count_in_item
 
-        # Filter out low-mention candidates (likely noise)
-        min_mentions_threshold = 2 # Require at least 2 mentions to be considered
-        filtered_mentions = [details for details in final_mentions.values() if details['mentions'] >= min_mentions_threshold]
+                        # Add context from the first match in this item, limit total context stored
+                        if len(final_mentions_data[name]['context']) < 15: # Store max 15 context snippets per software
+                            match_obj = matches[0]
+                            start = max(0, match_obj.start() - 100) # Wider context snippet
+                            end = min(len(item_text), match_obj.end() + 100)
+                            context_str = item_text[start:end].replace('\n', ' ').strip()
+                            # Include source URL and timestamp in context string
+                            context_with_meta = f"{context_str} (Source: {item_url}, Timestamp: {timestamp})"
+                            final_mentions_data[name]['context'].append(context_with_meta)
 
-        # Sort by mention count descending
-        return sorted(filtered_mentions, key=lambda x: x['mentions'], reverse=True)
+                except re.error:
+                    logging.warning(f"Regex error searching for software name: {name} in item: {item_url}")
+                    continue # Skip this name for this item if regex fails
+                except Exception as e:
+                    logging.error(f"Unexpected error processing name '{name}' in item '{item_url}': {e}", exc_info=False)
+                    continue
 
 
-    # _extract_context is effectively integrated into _extract_software_mentions now
+        # Filter out low-mention candidates (likely noise or irrelevant mentions)
+        min_mentions_threshold = 2 # Require at least 2 mentions across the entire dataset
+        filtered_mentions_list = [
+            details for details in final_mentions_data.values()
+            if details['mentions'] >= min_mentions_threshold
+        ]
+
+        # Sort by total mention count descending
+        return sorted(filtered_mentions_list, key=lambda x: x['mentions'], reverse=True)
 
 
     def _extract_pain_points_and_features(self, software_mentions_detailed: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Extracts pain points and feature requests related to software mentions.
-        Categorizes issues and assigns severity/type.
+        Extracts pain points and feature requests related to software mentions using keyword matching and sentiment analysis.
+
+        Args:
+            software_mentions_detailed: The detailed list of software mentions, including context snippets.
+
+        Returns:
+            A list of dictionaries, each representing a software and its associated issues (pain points/feature requests).
+            Issues are categorized by type and severity.
         """
         all_issues_data = []
-        issue_keywords_flat = {kw: cat for cat, kws in ALL_ISSUE_KEYWORDS.items() for kw in kws}
+        # Create a flat map of keyword -> category for efficient lookup
+        issue_keywords_flat: Dict[str, str] = {
+            kw.lower(): cat
+            for cat, kws in ALL_ISSUE_KEYWORDS.items() for kw in kws
+        }
+        # Define severity order for pain points
+        pain_severity_order = ['critical', 'major', 'minor']
 
+        logging.info("Extracting pain points and feature requests from software mention contexts...")
         for software in software_mentions_detailed:
             software_name = software['name']
-            contexts = software['context'] # Contexts now include source URL
-            software_issues = []
-
+            contexts = software['context'] # Contexts now include source URL and timestamp
             if not contexts:
                 continue
 
-            for context in contexts:
-                context_lower = context.lower()
+            software_issues: List[Dict[str, Any]] = []
+
+            for context_with_meta in contexts:
+                # Extract the actual text content from the metadata string if needed
+                # Assuming context_with_meta format: "Text... (Source: URL, Timestamp: TIME)"
+                context_match = re.match(r"^(.*)\s+\(Source:.*,\s+Timestamp:.*\)$", context_with_meta, re.DOTALL)
+                if context_match:
+                    context_text = context_match.group(1).strip()
+                else:
+                    context_text = context_with_meta # Use the whole string if parsing fails
+
+                context_lower = context_text.lower()
                 found_keywords = []
-                best_category = None # e.g., 'critical', 'major', 'minor', 'request'
-                severity = None # For pain points: 'critical', 'major', 'minor'
+                matched_categories: Set[str] = set()
 
+                # Find all matching keywords in the context
+                # Use word boundaries to avoid matching parts of words
                 for keyword, category in issue_keywords_flat.items():
-                    # Use word boundaries for more precise keyword matching
-                    if re.search(r'\b' + re.escape(keyword) + r'\b', context_lower):
-                        found_keywords.append(keyword)
-                        # Determine the most severe category found for this context
-                        if category in PAIN_POINT_KEYWORDS:
-                             current_severity_level = list(PAIN_POINT_KEYWORDS.keys()).index(category)
-                             if severity is None or current_severity_level < list(PAIN_POINT_KEYWORDS.keys()).index(severity):
-                                  severity = category
-                                  best_category = category # Update best category if it's a pain point
-                        elif category == 'request' and best_category not in PAIN_POINT_KEYWORDS: # Prioritize pain points over requests if both keywords appear
-                            best_category = 'request'
+                    try:
+                        if re.search(r'\b' + re.escape(keyword) + r'\b', context_lower):
+                            found_keywords.append(keyword)
+                            matched_categories.add(category)
+                    except re.error:
+                         logging.warning(f"Regex error searching for keyword: {keyword}")
+                         continue # Skip keyword if regex fails
 
+                if not found_keywords:
+                    continue # Skip context if no relevant keywords found
 
-                if found_keywords:
-                    sentiment_score = self.sentiment_analyzer(context).sentiment.polarity
+                # Determine the primary category and severity
+                best_category = None
+                severity = None
+                is_request = 'request' in matched_categories
+                pain_categories_found = {cat for cat in matched_categories if cat in pain_severity_order}
+
+                if pain_categories_found:
+                    # Prioritize the most severe pain point category found
+                    current_severity_level = -1
+                    for i, sev in enumerate(pain_severity_order):
+                         if sev in pain_categories_found:
+                              if current_severity_level == -1 or i < current_severity_level:
+                                   current_severity_level = i
+                                   severity = sev
+                                   best_category = sev # Assign the pain category
+
+                elif is_request: # If only request keywords found
+                    best_category = 'request'
+                    severity = None # Severity not applicable to requests
+
+                # If a category was determined, proceed to sentiment analysis and finalize issue type
+                if best_category:
+                    try:
+                         # Analyze sentiment of the original context text (before lowercasing)
+                         sentiment_score = self.sentiment_analyzer(context_text).sentiment.polarity
+                    except Exception as e:
+                         logging.warning(f"Sentiment analysis failed for context: {context_text[:100]}... Error: {e}")
+                         sentiment_score = 0.0 # Default to neutral if analysis fails
+
                     issue_type = 'unknown'
+                    if best_category == 'request':
+                        # Consider it a feature request unless sentiment is very negative
+                        issue_type = 'feature_request' if sentiment_score > -0.3 else 'pain_point'
+                        if issue_type == 'pain_point': severity = 'minor' # If negative sentiment overrides request keyword
 
-                    # Refine type/severity based on keywords and sentiment
-                    if best_category == 'request' and sentiment_score > -0.1: # If keywords suggest request and sentiment isn't strongly negative
-                        issue_type = 'feature_request'
-                        severity = None # Not applicable for feature requests
-                    elif severity: # If pain point keywords were found
+                    elif severity: # If a pain point category was identified
                          issue_type = 'pain_point'
-                         # Escalate severity based on strong negative sentiment
-                         if sentiment_score < -0.7 and severity == 'major':
-                             severity = 'critical'
-                         elif sentiment_score < -0.5 and severity == 'minor':
-                             severity = 'major'
-                    elif sentiment_score < -0.2: # If no clear keywords but negative sentiment
-                         issue_type = 'pain_point'
-                         severity = 'minor' # Assume minor if only sentiment is negative
+                         # Optionally escalate severity based on strong negative sentiment
+                         if sentiment_score < -0.6:
+                              if severity == 'major': severity = 'critical'
+                              elif severity == 'minor': severity = 'major'
 
-                    # Only add if we have a clear type
-                    if issue_type != 'unknown':
-                        software_issues.append({
-                            'context': context,
-                            'keywords': found_keywords,
-                            'type': issue_type, # 'pain_point' or 'feature_request'
-                            'severity': severity, # Only for pain_points ('critical', 'major', 'minor', None)
-                            'sentiment_score': round(sentiment_score, 2)
-                        })
+                    # Add the identified issue
+                    software_issues.append({
+                        'context': context_with_meta, # Store context with metadata
+                        'keywords': found_keywords,
+                        'type': issue_type, # 'pain_point' or 'feature_request'
+                        'severity': severity, # 'critical', 'major', 'minor', or None
+                        'sentiment_score': round(sentiment_score, 3)
+                    })
 
+            # After processing all contexts for a software, aggregate the results
             if software_issues:
-                # Separate pain points and feature requests for summary counts
                 pain_points = [iss for iss in software_issues if iss['type'] == 'pain_point']
                 feature_requests = [iss for iss in software_issues if iss['type'] == 'feature_request']
 
-                pain_severity_counts = {'critical': 0, 'major': 0, 'minor': 0}
-                for pp in pain_points:
-                    if pp['severity']:
-                        pain_severity_counts[pp['severity']] += 1
+                pain_severity_counts = collections.Counter(pp['severity'] for pp in pain_points if pp['severity'])
+
+                # Determine overall type based on which category has more issues
+                primary_type = 'pain_point' if len(pain_points) >= len(feature_requests) else 'feature_request'
 
                 all_issues_data.append({
                     'software': software_name,
-                    'issues': software_issues, # Keep all issues together for context
-                    'type': 'pain_point' if pain_points else 'feature_request', # Overall type based on content
+                    'issues': software_issues, # Keep all detailed issues
+                    'type': primary_type, # Primary issue type for this software
                     'pain_point_summary': {
                         'count': len(pain_points),
-                        'severity_counts': pain_severity_counts
+                        'severity_counts': dict(pain_severity_counts) # Convert Counter to dict for JSON compatibility
                     },
                     'feature_request_summary': {
                         'count': len(feature_requests)
@@ -549,548 +702,679 @@ class DataAnalyzer:
                     'total_issues': len(software_issues)
                 })
 
-        # Sort primarily by critical pain points, then total issues
+        # Sort results: Prioritize software with critical pain points, then by total issue count
         return sorted(all_issues_data, key=lambda x: (
-            x['pain_point_summary']['severity_counts']['critical'],
-            x['total_issues']
+            x['pain_point_summary']['severity_counts'].get('critical', 0), # Sort critical count descending
+            x['total_issues'] # Then by total issues descending
         ), reverse=True)
+
 
     def _calculate_demand_metrics(self, scraped_data: List[Dict[str, Any]], software_mentions_detailed: List[Dict[str, Any]], sentiment_analysis: Dict[str, Any]) -> Dict[str, Any]:
         """Calculate comprehensive demand metrics for mentioned software."""
-        metrics = {}
+        metrics: Dict[str, Any] = {}
         total_data_points = len(scraped_data)
-        if total_data_points == 0: return {}
+        if total_data_points == 0:
+            logging.warning("Cannot calculate demand metrics: No scraped data provided.")
+            return {}
+        if not software_mentions_detailed:
+            logging.warning("Cannot calculate demand metrics: No software mentions found.")
+            return {}
 
-        all_platforms = {data.get('platform', 'unknown') for data in scraped_data}
+        logging.info("Calculating demand metrics...")
+        # Calculate total mentions across all identified software AFTER filtering
         total_all_mentions = sum(s['mentions'] for s in software_mentions_detailed)
         if total_all_mentions == 0: total_all_mentions = 1 # Avoid division by zero
 
+        # Prepare timestamp conversion utility
+        def parse_timestamp(ts_str: Optional[str]) -> Optional[datetime.datetime]:
+            if not ts_str: return None
+            try:
+                # Handle ISO format with or without 'Z', microseconds optional
+                ts_str = ts_str.replace('Z', '+00:00')
+                # Try parsing with microseconds
+                try:
+                     return datetime.datetime.fromisoformat(ts_str).astimezone(datetime.timezone.utc)
+                except ValueError:
+                     # Try parsing without microseconds if the first attempt failed
+                     return datetime.datetime.fromisoformat(ts_str.split('.')[0] + ts_str.split('.')[-1][6:] if '.' in ts_str else ts_str).astimezone(datetime.timezone.utc)
+
+            except (ValueError, TypeError, IndexError) as e:
+                # logging.debug(f"Could not parse timestamp '{ts_str}': {e}") # Make debug to reduce noise
+                return None
+
+        # Pre-process data for faster lookups: Map data by software mention
+        data_by_software: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
+        all_software_names = {sw['name'] for sw in software_mentions_detailed}
+
+        for data_item in scraped_data:
+            item_text = self._combine_text_data([data_item])
+            if not item_text: continue
+            item_timestamp = parse_timestamp(data_item.get('timestamp'))
+            data_item['_parsed_timestamp'] = item_timestamp # Store parsed timestamp
+
+            # Check which of the *filtered* software are mentioned in this item
+            for sw_name in all_software_names:
+                 try:
+                      pattern = re.compile(r'\b' + re.escape(sw_name) + r'\b', re.IGNORECASE)
+                      if pattern.search(item_text):
+                           # Store the entire data item if the software is mentioned
+                           data_by_software[sw_name].append(data_item)
+                 except re.error:
+                      continue # Ignore if regex fails for a name
+
+        # Calculate metrics for each software
         for software in software_mentions_detailed:
             software_name = software['name']
-            mention_count = software['mentions']
+            mention_count = software['mentions'] # Use the count from extraction step
             platform_counts: Counter[str] = collections.Counter()
             engagement_metrics: Dict[str, float] = collections.defaultdict(float)
             mention_timestamps: List[datetime.datetime] = []
 
-            # Iterate through data to aggregate platform counts, engagement, timestamps for THIS software
-            for data in scraped_data:
+            # Iterate through data items where THIS software was mentioned
+            relevant_data_items = data_by_software.get(software_name, [])
+
+            for data in relevant_data_items:
                 platform = data.get('platform', 'unknown')
-                timestamp_str = data.get('timestamp')
-                item_text = self._combine_text_data([data])
+                item_timestamp = data.get('_parsed_timestamp') # Use pre-parsed timestamp
 
-                # Use regex for counting mentions within this specific data item
-                try:
-                    pattern = re.compile(r'\b' + re.escape(software_name) + r'\b', re.IGNORECASE)
-                    matches = pattern.findall(item_text)
-                    item_mention_count = len(matches)
-                except re.error:
-                    item_mention_count = 0
+                # Count platforms and collect timestamps
+                platform_counts[platform] += 1 # Count item once per platform if mentioned
+                if item_timestamp:
+                    mention_timestamps.append(item_timestamp)
 
-                if item_mention_count > 0:
-                    platform_counts[platform] += item_mention_count # Count all occurrences here
+                # Calculate platform-specific engagement score for this item
+                engagement_score = 0
+                if platform == 'reddit':
+                    score = data.get('upvotes', data.get('score', 0))
+                    num_comments = len(data.get('comments', []))
+                    engagement_score = (score if isinstance(score, (int, float)) else 0) + \
+                                       (num_comments * 2 if isinstance(num_comments, int) else 0)
+                elif platform == 'twitter':
+                    likes = data.get('likes', data.get('favorite_count', 0))
+                    retweets = data.get('retweets', data.get('retweet_count', 0))
+                    replies = len(data.get('replies', []))
+                    engagement_score = (likes if isinstance(likes, (int, float)) else 0) + \
+                                       (retweets * 2 if isinstance(retweets, (int, float)) else 0) + \
+                                       (replies * 3 if isinstance(replies, int) else 0)
+                elif platform == 'youtube':
+                    views = data.get('views', data.get('view_count', 0))
+                    likes = data.get('likes', data.get('like_count', 0))
+                    comments = len(data.get('comments', []))
+                    safe_views = views if isinstance(views, (int, float)) else 0
+                    safe_likes = likes if isinstance(likes, (int, float)) else 0
+                    safe_comments = comments if isinstance(comments, int) else 0
+                    # Log scale for views to prevent dominance, add likes and comments
+                    engagement_score = math.log1p(safe_views / 1000 if safe_views > 0 else 0) + safe_likes + safe_comments * 2
+                elif platform == 'producthunt':
+                    upvotes = data.get('upvotes', 0)
+                    comments = len(data.get('comments', []))
+                    safe_upvotes = upvotes if isinstance(upvotes, (int, float)) else 0
+                    safe_comments = comments if isinstance(comments, int) else 0
+                    engagement_score = safe_upvotes * 1.5 + safe_comments * 2
+                else: # Generic fallback: use comment count
+                    comments = len(data.get('comments', []))
+                    safe_comments = comments if isinstance(comments, int) else 0
+                    engagement_score = safe_comments
 
-                    # Add timestamp if valid
-                    if timestamp_str:
-                        try:
-                            # Handle various possible ISO formats, including 'Z' UTC marker
-                            dt = datetime.datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                            mention_timestamps.append(dt)
-                        except (ValueError, TypeError):
-                            # Fallback to now if parsing fails, log warning
-                            logging.debug(f"Could not parse timestamp '{timestamp_str}' for {software_name}. Using current time.")
-                            mention_timestamps.append(datetime.datetime.now(datetime.timezone.utc))
+                engagement_metrics[platform] += engagement_score
 
-                    # Platform-specific engagement (using normalized approach)
-                    # Weights are heuristics, can be adjusted
-                    engagement_score = 0
-                    if platform == 'reddit':
-                        # Consider score (upvotes) and comment count
-                        score = data.get('upvotes', data.get('score', 0))
-                        num_comments = len(data.get('comments', []))
-                        engagement_score = score + num_comments * 2 # Comments weighted more
-                    elif platform == 'twitter':
-                        likes = data.get('likes', data.get('favorite_count', 0))
-                        retweets = data.get('retweets', data.get('retweet_count', 0))
-                        replies = len(data.get('replies', []))
-                        # Quote tweets? Views? Data might vary.
-                        engagement_score = likes + retweets * 2 + replies * 3 # Replies weighted most
-                    elif platform == 'youtube':
-                        # Views can be huge, use logarithm or cap? Normalize carefully.
-                        views = data.get('views', data.get('view_count', 0))
-                        likes = data.get('likes', data.get('like_count', 0))
-                        comments = len(data.get('comments', []))
-                        # Normalize views, e.g., log scale or divide by a large number
-                        engagement_score = math.log1p(views / 1000) + likes + comments * 2 # Log(views/1k) + likes + comments*2
-                    elif platform == 'producthunt':
-                        upvotes = data.get('upvotes', 0)
-                        comments = len(data.get('comments', []))
-                        engagement_score = upvotes * 1.5 + comments * 2 # PH upvotes might be more indicative than Reddit's
-                    else: # Generic fallback
-                        engagement_score = len(data.get('comments', [])) # Simple comment count
+            # Calculate derived metrics after processing all relevant items
+            total_mentions_for_sw = mention_count # Use the pre-calculated total mentions
+            platform_mention_counts = collections.Counter()
+            for data in relevant_data_items:
+                 item_text = self._combine_text_data([data])
+                 try:
+                     pattern = re.compile(r'\b' + re.escape(software_name) + r'\b', re.IGNORECASE)
+                     matches_in_item = len(pattern.findall(item_text))
+                     platform_mention_counts[data.get('platform', 'unknown')] += matches_in_item
+                 except re.error: continue
 
-                    engagement_metrics[platform] += engagement_score
-
-            # Calculate metrics after iterating through all data for this software
-            total_mentions_for_sw = sum(platform_counts.values())
-            # Ensure consistency with the initially calculated mention_count if different
-            if total_mentions_for_sw != mention_count:
-                 logging.warning(f"Mention count mismatch for {software_name}. Initial: {mention_count}, Recalculated: {total_mentions_for_sw}. Using recalculated.")
-                 mention_count = total_mentions_for_sw # Use the sum from platform counts
-
+            # Use platform_mention_counts for distribution if more accurate counts needed per platform
+            # For percentages, using total_mentions_for_sw derived from items count is simpler here:
+            platform_item_counts = collections.Counter(d.get('platform', 'unknown') for d in relevant_data_items)
+            total_items_mentioning_sw = len(relevant_data_items)
             platform_percentages = {
-                platform: round(count / mention_count * 100, 2) if mention_count else 0
-                for platform, count in platform_counts.items()
+                platform: round(count / total_items_mentioning_sw * 100, 2) if total_items_mentioning_sw else 0
+                for platform, count in platform_item_counts.items()
             }
 
             recency_metrics = {}
             if mention_timestamps:
-                # Ensure all timestamps are timezone-aware (UTC) for correct comparison
-                mention_timestamps = [ts.astimezone(datetime.timezone.utc) if ts.tzinfo is None else ts for ts in mention_timestamps]
                 now = datetime.datetime.now(datetime.timezone.utc)
                 mention_timestamps.sort(reverse=True)
                 most_recent = mention_timestamps[0]
                 days_since_most_recent = (now - most_recent).days
                 # Normalize recency score (higher is better) - capped at 100
-                recency_score = max(0, 100 - days_since_most_recent * 2) # Simple linear decay, 0 after 50 days
+                recency_score = max(0.0, 100.0 - days_since_most_recent * 2.0) # Linear decay, 0 after 50 days
 
+                # Calculate mentions per day over the observed period
+                mentions_per_day = 0
                 if len(mention_timestamps) >= 2:
                     oldest = mention_timestamps[-1]
-                    time_span_days = max(1, (most_recent - oldest).days) # Avoid division by zero
+                    # Ensure time span is at least 1 day to avoid division by zero
+                    time_span_days = max(1.0, (most_recent - oldest).total_seconds() / (24 * 3600))
                     mentions_per_day = len(mention_timestamps) / time_span_days
                 elif len(mention_timestamps) == 1:
-                     mentions_per_day = 1 # Assume 1 mention per day if only one timestamp
-                else:
-                    mentions_per_day = 0
+                     mentions_per_day = 1.0 # Assume 1 mention if only one timestamp
 
                 recency_metrics = {
                     'days_since_most_recent': days_since_most_recent,
                     'recency_score': round(recency_score, 2), # 0-100 scale
-                    'mentions_per_day_avg': round(mentions_per_day, 3)
+                    'mentions_per_day_observed': round(mentions_per_day, 3) # Avg over the period data was found
                 }
 
             # Get average sentiment for demand score calculation
             avg_sentiment = sentiment_analysis.get(software_name, {}).get('average_sentiment', 0.0)
 
+            # Calculate final demand score
             demand_score = self._calculate_demand_score(
-                mention_count, platform_counts, engagement_metrics, recency_metrics, avg_sentiment
+                total_mentions_for_sw, # Use the accurate total mention count
+                platform_item_counts, # Use counts of items per platform for diversity
+                engagement_metrics,
+                recency_metrics,
+                avg_sentiment
             )
 
             metrics[software_name] = {
-                'total_mentions': mention_count,
-                'mention_percentage_overall': round(mention_count / total_all_mentions * 100, 2),
-                'platform_distribution': dict(platform_counts),
-                'platform_percentages': platform_percentages,
-                'engagement_metrics_total': sum(engagement_metrics.values()),
-                'engagement_by_platform': dict(engagement_metrics),
+                'total_mentions': total_mentions_for_sw,
+                'mention_percentage_overall': round(total_mentions_for_sw / total_all_mentions * 100, 2) if total_all_mentions > 1 else 100.0,
+                'platform_distribution_items': dict(platform_item_counts), # Distribution of data items mentioning the sw
+                'platform_distribution_mentions': dict(platform_mention_counts), # Distribution of actual mentions
+                'platform_percentages_items': platform_percentages,
+                'engagement_metrics_total': round(sum(engagement_metrics.values()), 2),
+                'engagement_by_platform': {k: round(v, 2) for k,v in engagement_metrics.items()},
                 'recency_metrics': recency_metrics,
                 'demand_score': demand_score # Single combined score
             }
 
-        # Sort final metrics by demand score
+        # Sort final metrics dictionary by demand score descending
         return dict(sorted(metrics.items(), key=lambda item: item[1]['demand_score'], reverse=True))
 
-    def _calculate_demand_score(self, mention_count: int, platform_counts: Counter[str], engagement_metrics: Dict[str, float], recency_metrics: Dict[str, Any], avg_sentiment: float) -> float:
+    def _calculate_demand_score(self,
+                              mention_count: int,
+                              platform_item_counts: Counter[str],
+                              engagement_metrics: Dict[str, float],
+                              recency_metrics: Dict[str, Any],
+                              avg_sentiment: float) -> float:
         """Calculate an enhanced demand score based on multiple factors."""
         if mention_count == 0:
             return 0.0
 
+        # --- Weighting Factors (adjustable heuristics) ---
+        W_MENTIONS = 10.0
+        W_DIVERSITY = 0.5 # Max bonus for platform diversity
+        W_ENGAGEMENT = 20.0 # Divisor for log engagement score (lower = higher impact)
+        W_RECENCY = 0.5 # Max bonus for recency score
+        W_FREQUENCY = 0.2 # Multiplier for log mentions/day bonus
+        W_SENTIMENT = 0.5 # Max adjustment (+/-) based on sentiment (scaled)
+
         # 1. Base Score: Log of mentions to dampen effect of extremely high counts
-        base_score = math.log1p(mention_count) * 10 # Scale factor
+        # Use total actual mentions for base score magnitude
+        base_score = math.log1p(mention_count) * W_MENTIONS
 
-        # 2. Platform Diversity: Bonus for appearing on more platforms
-        platform_diversity = len([count for count in platform_counts.values() if count > 0])
-        # Normalize diversity score (0 to 1, assuming max ~5 platforms reasonable)
-        diversity_factor = 1 + (platform_diversity / 5.0) * 0.5 # Max 50% bonus
+        # 2. Platform Diversity: Bonus for appearing on more platforms (using item counts)
+        num_platforms = len([count for count in platform_item_counts.values() if count > 0])
+        # Normalize diversity score (0 to 1, assuming max ~5 platforms reasonable baseline)
+        diversity_factor = 1.0 + min(1.0, num_platforms / 5.0) * W_DIVERSITY
 
-        # 3. Engagement Factor: Log of total engagement
+        # 3. Engagement Factor: Log of total engagement (sum across platforms)
         total_engagement = sum(engagement_metrics.values())
-        # Normalize engagement (log scale, max ~50% bonus)
-        engagement_factor = 1 + math.log1p(total_engagement) / 20.0 # Adjust divisor as needed
+        # Normalize engagement (log scale, higher engagement increases factor)
+        engagement_factor = 1.0 + math.log1p(total_engagement) / W_ENGAGEMENT
 
         # 4. Recency Factor: Use the 0-100 recency score
         recency_score = recency_metrics.get('recency_score', 0)
-        # Normalize recency (max 50% bonus)
-        recency_factor = 1 + (recency_score / 100.0) * 0.5
+        # Normalize recency (max W_RECENCY bonus for score of 100)
+        recency_factor = 1.0 + (recency_score / 100.0) * W_RECENCY
 
-        # 5. Frequency Factor: Average mentions per day (capped)
-        mentions_per_day = recency_metrics.get('mentions_per_day_avg', 0)
-        # Normalize frequency (log scale, capped bonus)
-        frequency_factor = 1 + math.log1p(mentions_per_day) * 0.2 # Smaller bonus for frequency
+        # 5. Frequency Factor: Average mentions per day over observed period (capped bonus)
+        mentions_per_day = recency_metrics.get('mentions_per_day_observed', 0)
+        # Normalize frequency (log scale, provides smaller bonus)
+        frequency_factor = 1.0 + math.log1p(mentions_per_day) * W_FREQUENCY
 
-        # 6. Sentiment Factor: Negative sentiment slightly increases demand for alternatives
-        # Map sentiment (-1 to 1) to a factor (e.g., 0.9 to 1.1)
-        # More negative sentiment -> higher factor
-        sentiment_factor = 1 - min(0.2, max(-0.5, avg_sentiment)) / 2 # e.g., -0.5 maps to 1.125, 0 maps to 1, 0.5 maps to 0.875
+        # 6. Sentiment Factor: Adjust score based on average sentiment.
+        # Negative sentiment slightly increases score (implying problems needing solutions),
+        # Positive sentiment slightly decreases it (implying satisfaction).
+        # Map sentiment (-1 to 1) to a factor around 1.0.
+        # Example: Scale sentiment impact between -0.25 and +0.25 -> factor 0.75 to 1.25
+        sentiment_adjustment = -(avg_sentiment * W_SENTIMENT) # Negative sentiment gives positive adjustment
+        sentiment_factor = 1.0 + sentiment_adjustment
 
-        # Combine factors multiplicatively
+        # Combine factors multiplicatively with the base score
         final_score = base_score * diversity_factor * engagement_factor * recency_factor * frequency_factor * sentiment_factor
 
-        return round(final_score, 2)
+        # Ensure score is non-negative
+        return max(0.0, round(final_score, 2))
+
 
     def _generate_product_ideas(self, pain_points_data: List[Dict[str, Any]], feature_requests_data: List[Dict[str, Any]], demand_metrics: Dict[str, Any], co_occurrence: Dict[str, Dict[str, int]]) -> List[Dict[str, Any]]:
-        """Generate product ideas based on pain points, features, demand, and co-occurrence."""
+        """Generate product ideas based on pain points, features, demand, and co-occurrence using AI and fallbacks."""
         product_ideas = []
-        processed_software = set() # Avoid redundant ideas for the same base software
+        processed_software_fallback = set() # Track software processed by fallback to avoid duplicates
+        ai_generated_targets = set() # Track software targeted by AI ideas
 
-        # Combine pain points and features for easier lookup
-        all_issues_map = collections.defaultdict(list)
+        # Combine pain points and features into a single lookup map for easier access
+        all_issues_map: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
         for item in pain_points_data + feature_requests_data:
-            all_issues_map[item['software']].extend(item['issues'])
+            all_issues_map[item['software']].extend(item['issues']) # Assumes 'issues' key exists from _extract_pain_points...
+
+        ai_available = bool(self.api_key and (self.genai or self.genai_client or self.openai or self.anthropic_client))
 
         # --- Attempt AI Idea Generation First (If API Key Available) ---
-        # DO NOT CHANGE GEMINI CALL LOGIC
-        if self.api_key and (self.genai_client or self.genai or self.openai or self.anthropic_client):
+        if ai_available:
             try:
-                logging.info("Attempting product idea generation using AI...")
-                # Prepare concise input for the AI prompt
-                top_demand_sw = list(demand_metrics.keys())[:10] # Focus on top 10 demand software
-                relevant_issues = []
-                for sw_name in top_demand_sw:
+                logging.info(f"Attempting product idea generation using AI ({self.api_type})...")
+                # Prepare concise input for the AI prompt: focus on top N software by demand
+                top_demand_sw_names = list(demand_metrics.keys())[:10] # Focus on top 10 by demand score
+                relevant_issues_summary = []
+                for sw_name in top_demand_sw_names:
                     issues = all_issues_map.get(sw_name, [])
-                    if issues:
-                        # Summarize issues: top 3 pain points, top 3 features
-                        pps = sorted([i for i in issues if i['type'] == 'pain_point' and i['severity']], key=lambda x: list(PAIN_POINT_KEYWORDS.keys()).index(x['severity']))[:3]
-                        frs = [i for i in issues if i['type'] == 'feature_request'][:3]
-                        relevant_issues.append({
+                    if not issues: continue
+
+                    # Sort issues within the software
+                    pps = sorted([i for i in issues if i['type'] == 'pain_point' and i.get('severity')],
+                                 key=lambda x: PAIN_POINT_KEYWORDS.get(x['severity'], 3)) # Sort by severity index
+                    frs = [i for i in issues if i['type'] == 'feature_request']
+
+                    # Select top 3 of each type for the prompt
+                    top_pps_contexts = [f"{p['severity']}: {p['context'][:120]}..." for p in pps[:3]]
+                    top_frs_contexts = [f"{f['context'][:120]}..." for f in frs[:3]]
+
+                    # Only include software if it has significant issues
+                    if top_pps_contexts or top_frs_contexts:
+                        relevant_issues_summary.append({
                             "software": sw_name,
-                            "demand_score": demand_metrics[sw_name]['demand_score'],
-                            "top_pain_points": [f"{p['severity']}: {p['context'][:100]}..." for p in pps],
-                            "top_feature_requests": [f"{f['context'][:100]}..." for f in frs]
+                            "demand_score": demand_metrics.get(sw_name, {}).get('demand_score', 0),
+                            "top_pain_points": top_pps_contexts,
+                            "top_feature_requests": top_frs_contexts
                         })
 
-                if not relevant_issues:
-                     logging.warning("No relevant issues found for top demand software to feed to AI.")
-                     # Proceed to fallback directly if no issues for top software
+                if not relevant_issues_summary:
+                     logging.warning("No significant issues found for top demand software to feed to AI for idea generation.")
+                     # Proceed to fallback directly
 
                 else:
+                    # Limit the size of the summary to avoid overly long prompts
+                    max_prompt_issues = 15 # Limit total items sent to AI
+                    if len(relevant_issues_summary) > max_prompt_issues:
+                        logging.warning(f"Too many relevant issues ({len(relevant_issues_summary)}); truncating to top {max_prompt_issues} for AI prompt.")
+                        relevant_issues_summary = relevant_issues_summary[:max_prompt_issues]
+
                     ai_prompt = f"""
-                    You are a Product Manager analyzing user feedback to brainstorm new product ideas or improvements.
-                    Based on the following software issues (pain points and feature requests) and their demand scores (higher score means more discussion/engagement), generate multiple SPECIFIC and ACTIONABLE product ideas.
+                    You are a Product Manager analyzing user feedback from online discussions to brainstorm SPECIFIC and ACTIONABLE product ideas or feature improvements.
+                    Based ONLY on the provided software issues (pain points and feature requests) and their demand scores (higher score = more discussion), generate several distinct product ideas.
 
-                    Focus on creating solutions that directly address the identified problems or missing features for high-demand software. Ideas can be:
-                    1. An improved alternative to an existing product.
-                    2. A new tool that combines features or fills a gap between existing tools.
-                    3. A focused feature add-on or plugin.
+                    Focus on:
+                    1. New tools addressing unmet needs highlighted by feature requests for high-demand software.
+                    2. Improved alternatives solving critical/major pain points of existing high-demand software.
+                    3. Integrations or plugins bridging gaps suggested by co-occurrence or feature requests involving multiple tools (if applicable from context).
 
-                    Provided Data (Top Demand Software Issues):
+                    Provided Data (Summarized Issues for High-Demand Software):
                     ---
-                    {json.dumps(relevant_issues, indent=2)}
+                    {json.dumps(relevant_issues_summary, indent=2)}
                     ---
 
                     For EACH product idea, provide:
-                    - "target_software": [List of one or more existing software the idea relates to]
-                    - "idea_name": A concise, descriptive name for the new product/feature.
-                    - "idea_description": A clear explanation of the product/feature and WHICH specific pain points or feature requests it solves. Be explicit.
-                    - "key_features": [List of 3-5 bullet points outlining the core functionalities]
-                    - "justification": Briefly explain why this idea is promising based on the input data (e.g., "High demand for X, addresses critical pain point Y").
+                    - "target_software": [List of one or more existing software the idea relates to/competes with]
+                    - "idea_name": A concise, marketable name for the new product/feature.
+                    - "idea_description": A clear explanation (1-2 sentences) of what the product/feature does and WHICH specific pain points or feature requests it solves, referencing the input data.
+                    - "key_features": [List of 3-5 bullet points outlining core functionalities needed to address the issues]
+                    - "justification": Briefly explain the opportunity based on the input (e.g., "Addresses critical 'crash' pain point for high-demand 'Tool X'").
 
-                    Generate AS MANY distinct and well-justified ideas as possible based *only* on the provided data. Aim for diversity in the types of ideas.
+                    Generate multiple distinct ideas if possible. Prioritize ideas addressing critical/major pain points or frequent feature requests for software with high demand scores.
 
-                    Format your response STRICTLY as a JSON array of objects, each object representing one product idea with the keys mentioned above.
-                    Example:
+                    Format your response STRICTLY as a JSON array of objects, each object representing one product idea with the keys mentioned above ("target_software", "idea_name", "idea_description", "key_features", "justification").
+                    Example JSON Array:
                     [
                       {{
-                        "target_software": ["Slack"],
-                        "idea_name": "Slack Focus Assist",
-                        "idea_description": "A Slack plugin to reduce notification fatigue (addressing 'annoying', 'frustrating' comments) by intelligently batching non-urgent messages and allowing deep work sessions.",
+                        "target_software": ["Software A"],
+                        "idea_name": "Software A Stability Suite",
+                        "idea_description": "An add-on for Software A designed to fix common 'crash' and 'freeze' issues reported by users, ensuring smoother workflows.",
                         "key_features": [
-                          "Configurable notification batching intervals.",
-                          "AI-powered priority sorting of messages.",
-                          "One-click 'Deep Work' mode activation.",
-                          "Customizable keyword alerts.",
-                          "Team status visibility for focus modes."
+                          "Real-time performance monitoring.",
+                          "Automated resource management.",
+                          "Crash diagnostics reporting.",
+                          "Compatibility checker for plugins.",
+                          "Proactive stability alerts."
                         ],
-                        "justification": "Addresses common Slack pain point of distraction (high demand score) with specific features."
+                        "justification": "Addresses critical stability pain points ('crash', 'freeze') for high-demand 'Software A'."
                       }},
-                      {{ ... another idea ... }}
+                      {{ ... another idea object ... }}
                     ]
                     ---
-                    Respond only with the JSON array.
+                    Respond only with the JSON array. Do not include any preamble or explanation outside the JSON structure.
                     """
 
                     ai_ideas_raw = None
-                    if self.api_type == 'gemini' and (self.genai_client or self.genai):
-                        # Ensure consistency with the API call method used in setup
-                        if self.genai_client and hasattr(self.genai_client, 'generate_content'):
-                             logging.warning("Using model 'gemini-2.0-flash' for idea generation as specified.")
-                             response = self.genai_client.generate_content(model='models/gemini-1.5-flash-latest', contents=ai_prompt) # Match model identifier
-                             ai_ideas_raw = response.text
-                        elif self.genai and hasattr(self.genai, 'models') and hasattr(self.genai.models, 'generate_content'):
-                             logging.warning("Using model 'gemini-2.0-flash' via genai.models.generate_content for idea generation.")
-                             response = self.genai.models.generate_content(model='models/gemini-1.5-flash-latest', contents=ai_prompt) # Match model identifier
-                             ai_ideas_raw = response.text
-                        else:
-                            logging.error("Gemini AI object not configured correctly for content generation.")
+                    model_to_use = 'models/gemini-1.5-flash-latest' # Default Gemini model
+
+                    # --- AI Call Logic ---
+                    if self.api_type == 'gemini' and (self.genai or self.genai_client):
+                         if self.genai and hasattr(self.genai, 'GenerativeModel'):
+                              logging.info(f"Using Gemini model '{model_to_use}' via configured genai module for idea generation.")
+                              model = self.genai.GenerativeModel(model_to_use)
+                              # Add safety settings appropriate for idea generation if needed
+                              # safety_settings = [...]
+                              response = model.generate_content(ai_prompt) #, safety_settings=safety_settings)
+                              ai_ideas_raw = response.text
+                         elif self.genai_client and hasattr(self.genai_client, 'generate_content'):
+                              logging.warning(f"Using Gemini model '{model_to_use}' via genai.Client instance for idea generation.")
+                              response = self.genai_client.generate_content(model=model_to_use, contents=ai_prompt) # Adapt if Client API differs
+                              ai_ideas_raw = response.text
+                         else:
+                              logging.error("Gemini AI object not configured correctly for idea generation.")
 
                     elif self.api_type == 'openai' and self.openai:
-                        response = self.openai.chat.completions.create(
-                            model='gpt-4o-mini', # Use a cost-effective but capable model
-                            response_format={'type': 'json_object'},
-                            messages=[
-                                {'role': 'system', 'content': 'You generate product ideas based on software pain points and feature requests, returning a JSON array.'},
-                                {'role': 'user', 'content': ai_prompt}
-                            ]
-                        )
-                        ai_ideas_raw = response.choices[0].message.content
+                         logging.info("Using OpenAI model 'gpt-4o-mini' for idea generation.")
+                         response = self.openai.chat.completions.create(
+                             model='gpt-4o-mini',
+                             response_format={'type': 'json_object'},
+                             messages=[
+                                 {'role': 'system', 'content': 'You generate product ideas based on software pain points and feature requests, returning a JSON array of idea objects.'},
+                                 {'role': 'user', 'content': ai_prompt}
+                             ]
+                         )
+                         ai_ideas_raw = response.choices[0].message.content
 
                     elif self.api_type == 'anthropic' and self.anthropic_client:
-                        response = self.anthropic_client.messages.create(
-                            model='claude-3-haiku-20240307', # Fast model suitable for generation
-                            max_tokens=3000, # Allow more tokens for potentially many ideas
-                            messages=[{'role': 'user', 'content': ai_prompt}]
-                        )
-                        ai_ideas_raw = response.content[0].text
+                         logging.info("Using Anthropic model 'claude-3-haiku-20240307' for idea generation.")
+                         response = self.anthropic_client.messages.create(
+                             model='claude-3-haiku-20240307',
+                             max_tokens=3000, # Allow ample tokens for multiple ideas
+                             messages=[{'role': 'user', 'content': ai_prompt}]
+                         )
+                         ai_ideas_raw = response.content[0].text
+                    # --- End AI Call Logic ---
 
                     if ai_ideas_raw:
-                        # Extract JSON array robustly
-                        json_match = re.search(r'\[\s*{.*}\s*\]', ai_ideas_raw, re.DOTALL)
+                        # Extract JSON array robustly from potential markdown code blocks
+                        json_match = re.search(r'\[\s*\{.*?\}\s*\]', ai_ideas_raw, re.DOTALL)
                         if json_match:
                             try:
                                 parsed_ideas = json.loads(json_match.group(0))
                                 if isinstance(parsed_ideas, list):
-                                    # Validate and structure the ideas
+                                    valid_ideas_count = 0
                                     for idea in parsed_ideas:
-                                        if isinstance(idea, dict) and all(k in idea for k in ['target_software', 'idea_name', 'idea_description', 'key_features']):
-                                            # Add demand score and link back pain points if possible
-                                            targets = idea['target_software']
-                                            primary_target = targets[0] if targets else None
+                                        # Validate structure of each idea object
+                                        if isinstance(idea, dict) and all(k in idea for k in ['target_software', 'idea_name', 'idea_description', 'key_features', 'justification']):
+                                            primary_target = idea['target_software'][0] if idea.get('target_software') else None
                                             demand_score = 0
                                             if primary_target and primary_target in demand_metrics:
                                                  demand_score = demand_metrics[primary_target].get('demand_score', 0)
 
                                             product_ideas.append({
-                                                'target_software': targets,
+                                                'target_software': idea['target_software'],
                                                 'idea_name': idea['idea_name'],
                                                 'idea_description': idea['idea_description'],
-                                                'key_features': idea.get('key_features', []),
-                                                'justification': idea.get('justification', 'AI Generated Idea'),
+                                                'key_features': idea['key_features'],
+                                                'justification': idea['justification'],
                                                 'demand_score_primary_target': demand_score,
                                                 'generation_method': 'ai'
                                             })
-                                            if primary_target: processed_software.add(primary_target)
+                                            # Track which software were targeted by AI ideas
+                                            if isinstance(idea['target_software'], list):
+                                                ai_generated_targets.update(idea['target_software'])
+                                            valid_ideas_count += 1
+                                        else:
+                                            logging.warning(f"Skipping malformed AI idea object: {idea}")
 
-                                    logging.info(f"Successfully generated {len(product_ideas)} product ideas using AI.")
+                                    logging.info(f"Successfully generated and parsed {valid_ideas_count} product ideas using AI.")
                             except json.JSONDecodeError as e:
-                                logging.warning(f"AI response for ideas was not valid JSON: {e}. Raw: {ai_ideas_raw[:200]}...")
+                                logging.warning(f"AI response for ideas looked like JSON but failed to parse: {e}. Raw match starts: {json_match.group(0)[:200]}...")
                         else:
-                            logging.warning(f"Could not find JSON array in AI idea response. Raw: {ai_ideas_raw[:200]}...")
+                            logging.warning(f"Could not find JSON array '[]' in AI idea response. Raw output starts: {ai_ideas_raw[:200]}...")
+                    else:
+                         logging.warning(f"AI ({self.api_type}) returned no output for idea generation.")
 
             except Exception as e:
                 logging.error(f"Error during AI product idea generation ({self.api_type}): {e}", exc_info=True)
+                # Proceed to fallback even if AI fails
 
         # --- Fallback / Augmentation Idea Generation ---
         logging.info("Running fallback/augmentation for product idea generation...")
 
-        # 1. Identify Common Themes
-        theme_counter: Counter[str] = collections.Counter()
-        for sw, issues in all_issues_map.items():
-            for issue in issues:
-                 if issue['type'] == 'pain_point' and issue['severity']:
-                      theme_counter[f"pain_{issue['severity']}"] += 1 # e.g., pain_critical
-                      # Could add keyword-based themes here (e.g., 'performance', 'ui', 'cost')
-                 elif issue['type'] == 'feature_request':
-                      theme_counter['feature_request'] += 1
-                      # Could add themes based on request keywords (e.g., 'integration', 'api')
-
-        top_themes = [theme for theme, count in theme_counter.most_common(5)]
-        logging.info(f"Identified common themes: {top_themes}")
-
-        # 2. Iterate through High-Demand Software (that AI didn't cover)
+        # Iterate through software sorted by demand, focusing on those NOT covered by AI
         sorted_demand = sorted(demand_metrics.items(), key=lambda item: item[1]['demand_score'], reverse=True)
-
         ideas_generated_fallback = 0
-        max_fallback_ideas = 30 # Limit the number of fallback ideas to avoid excessive output
+        max_fallback_ideas = 25 # Limit the number of fallback ideas
 
         for sw_name, metrics in sorted_demand:
             if ideas_generated_fallback >= max_fallback_ideas:
+                 logging.info(f"Reached fallback idea limit ({max_fallback_ideas}).")
                  break
-            if sw_name in processed_software: # Skip if AI already generated ideas for this
+            # Skip if AI already targeted this software OR if already processed by fallback
+            if sw_name in ai_generated_targets or sw_name in processed_software_fallback:
                  continue
-            if sw_name not in all_issues_map: # Skip if no issues were mapped to it
+            if sw_name not in all_issues_map: # Skip if no issues were mapped
                  continue
 
             demand_score = metrics.get('demand_score', 0)
             issues = all_issues_map[sw_name]
-            pain_points = sorted([i for i in issues if i['type'] == 'pain_point' and i['severity']], key=lambda x: list(PAIN_POINT_KEYWORDS.keys()).index(x['severity']))
+            # Get top pain point (most severe)
+            pain_points = sorted(
+                [i for i in issues if i['type'] == 'pain_point' and i.get('severity')],
+                key=lambda x: pain_severity_order.index(x['severity']) if x['severity'] in pain_severity_order else 99 # Sort by severity index
+            )
+            # Get representative feature requests
             feature_requests = [i for i in issues if i['type'] == 'feature_request']
 
-            # Idea Type 1: Address Top Pain Point
+            # Idea Type 1: Address Top Pain Point (if critical or major)
             if pain_points:
                 top_pp = pain_points[0]
-                idea_name = f"Improved {sw_name} Alternative (Fixing {top_pp['severity'].capitalize()} Issues)"
-                idea_desc = f"A replacement for {sw_name} focused on resolving the common '{top_pp['severity']}' pain point related to: {top_pp['context'][:150]}..."
+                # Generate idea only for significant pain points
+                if top_pp['severity'] in ['critical', 'major']:
+                    # Simplify context for name/desc
+                    simple_context = re.sub(r'\s+\(Source:.*?\)', '', top_pp['context'])[:150]
+                    keyword = top_pp['keywords'][0] if top_pp['keywords'] else 'issues'
+
+                    idea_name = f"{sw_name} Reliability/Usability Fix"
+                    idea_desc = f"Addresses the top '{top_pp['severity']}' pain point for {sw_name} related to '{keyword}' ({simple_context}...)."
+                    key_features = [
+                        f"Improved stability/performance targeting '{keyword}'.",
+                        "Enhanced error handling/reporting.",
+                        f"Streamlined workflow for tasks related to '{keyword}'.",
+                        "User feedback mechanism focused on stability."
+                    ]
+                    product_ideas.append({
+                        'target_software': [sw_name], 'idea_name': idea_name, 'idea_description': idea_desc,
+                        'key_features': key_features,
+                        'justification': f"Targets '{top_pp['severity']}' pain ({keyword}) for {sw_name} (Demand: {demand_score:.1f}). Found {len(pain_points)} pain points.",
+                        'demand_score_primary_target': demand_score, 'generation_method': 'fallback_painpoint'
+                    })
+                    processed_software_fallback.add(sw_name) # Mark as processed
+                    ideas_generated_fallback += 1
+                    if ideas_generated_fallback >= max_fallback_ideas: break
+
+            # Idea Type 2: Fulfill Top Feature Request (if not already processed)
+            if feature_requests and sw_name not in processed_software_fallback:
+                top_fr = feature_requests[0] # Just take the first one found for simplicity
+                keyword = top_fr['keywords'][0] if top_fr['keywords'] else 'feature'
+                # Simplify context
+                simple_context = re.sub(r'\s+\(Source:.*?\)', '', top_fr['context'])[:150]
+
+                idea_name = f"{sw_name} Extension: {keyword.capitalize()} Integration"
+                idea_desc = f"Adds the requested '{keyword}' capability to {sw_name}, addressing demand like: {simple_context}..."
                 key_features = [
-                    f"Core {sw_name} functionality",
-                    f"Enhanced performance/stability/usability (addressing '{top_pp['keywords'][0]}')",
-                    "Modern user interface",
-                    "Feedback mechanism for ongoing improvement"
+                    f"Seamless implementation of '{keyword}' feature.",
+                    f"Integration with existing {sw_name} workflows.",
+                    "User configuration options for the new feature.",
+                    "Documentation and examples for usage."
                 ]
                 product_ideas.append({
-                    'target_software': [sw_name],
-                    'idea_name': idea_name,
-                    'idea_description': idea_desc,
+                    'target_software': [sw_name], 'idea_name': idea_name, 'idea_description': idea_desc,
                     'key_features': key_features,
-                    'justification': f"Addresses top '{top_pp['severity']}' pain point for {sw_name} (Demand: {demand_score}). Evidence: {len(pain_points)} pain points found.",
-                    'demand_score_primary_target': demand_score,
-                    'generation_method': 'fallback_painpoint'
+                    'justification': f"Fulfills feature request '{keyword}' for {sw_name} (Demand: {demand_score:.1f}). Found {len(feature_requests)} requests.",
+                    'demand_score_primary_target': demand_score, 'generation_method': 'fallback_feature'
                 })
-                processed_software.add(sw_name) # Mark as processed for this type
+                processed_software_fallback.add(sw_name)
                 ideas_generated_fallback += 1
                 if ideas_generated_fallback >= max_fallback_ideas: break
 
-
-            # Idea Type 2: Fulfill Top Feature Request
-            if feature_requests and sw_name not in processed_software: # Check if already processed
-                top_fr = feature_requests[0]
-                idea_name = f"{sw_name} Plus with {top_fr['keywords'][0].capitalize()} Feature"
-                idea_desc = f"An enhanced version of {sw_name} or a dedicated add-on that incorporates the frequently requested feature: {top_fr['context'][:150]}..."
-                key_features = [
-                    f"Seamless integration with {sw_name}",
-                    f"Implementation of '{top_fr['keywords'][0]}' functionality",
-                    "User-friendly configuration",
-                    "Potential for additional related features"
-                ]
-                product_ideas.append({
-                    'target_software': [sw_name],
-                    'idea_name': idea_name,
-                    'idea_description': idea_desc,
-                    'key_features': key_features,
-                    'justification': f"Fulfills top feature request for {sw_name} (Demand: {demand_score}). Evidence: {len(feature_requests)} requests found.",
-                    'demand_score_primary_target': demand_score,
-                    'generation_method': 'fallback_feature'
-                })
-                processed_software.add(sw_name)
-                ideas_generated_fallback += 1
-                if ideas_generated_fallback >= max_fallback_ideas: break
-
-            # Idea Type 3: Alternative based on Co-occurrence (if tool A is mentioned with issues alongside tool B)
-            if sw_name in co_occurrence and sw_name not in processed_software:
+            # Idea Type 3: Alternative based on High Co-occurrence (if not already processed)
+            if sw_name in co_occurrence and sw_name not in processed_software_fallback:
+                 # Find top co-occurring software for sw_name
                  competitors = sorted(co_occurrence[sw_name].items(), key=lambda item: item[1], reverse=True)
                  if competitors:
                       top_competitor, count = competitors[0]
-                      # Check if competitor also has high demand / issues
-                      comp_demand = demand_metrics.get(top_competitor, {}).get('demand_score', 0)
-                      comp_issues = len(all_issues_map.get(top_competitor, []))
+                      # Only generate if competitor is also somewhat relevant and not already processed
+                      if top_competitor in demand_metrics and top_competitor not in processed_software_fallback and top_competitor not in ai_generated_targets:
+                           comp_demand = demand_metrics.get(top_competitor, {}).get('demand_score', 0)
+                           # Only suggest if competitor has some demand and co-occurrence is significant
+                           if comp_demand > 0 and count >= 2: # Require at least 2 co-occurrences
+                                idea_name = f"Unified Workflow: {sw_name} + {top_competitor}"
+                                idea_desc = f"A tool combining key features of {sw_name} and {top_competitor} to streamline workflows, potentially addressing issues mentioned when both are discussed (Co-occurrence: {count})."
+                                key_features = [
+                                    f"Core functionality inspired by {sw_name}.",
+                                    f"Core functionality inspired by {top_competitor}.",
+                                    "Seamless data flow / integration between feature sets.",
+                                    "Focus on addressing shared pain points (if identifiable)."
+                                ]
+                                product_ideas.append({
+                                    'target_software': [sw_name, top_competitor], 'idea_name': idea_name, 'idea_description': idea_desc,
+                                    'key_features': key_features,
+                                    'justification': f"High co-occurrence ({count}) between {sw_name} (D:{demand_score:.1f}) & {top_competitor} (D:{comp_demand:.1f}) suggests integration opportunity.",
+                                    'demand_score_primary_target': demand_score, # Base on primary sw
+                                    'generation_method': 'fallback_cooccurrence'
+                                })
+                                processed_software_fallback.add(sw_name)
+                                processed_software_fallback.add(top_competitor) # Mark competitor too
+                                ideas_generated_fallback += 1
+                                if ideas_generated_fallback >= max_fallback_ideas: break
 
-                      if comp_issues > 0 or comp_demand > demand_score / 2: # If competitor is also discussed/has issues
-                           idea_name = f"Unified Alternative to {sw_name} and {top_competitor}"
-                           idea_desc = f"A new tool combining the strengths of {sw_name} and {top_competitor}, while addressing common pain points found in discussions mentioning both (Co-occurrence: {count}). Aims to solve issues like: {pain_points[0]['context'][:100] if pain_points else 'N/A'}..."
-                           key_features = [
-                               f"Key feature set from {sw_name}",
-                               f"Key feature set from {top_competitor}",
-                               "Improved workflow integration",
-                               "Addresses specific shared pain points (if identifiable)",
-                           ]
-                           product_ideas.append({
-                               'target_software': [sw_name, top_competitor],
-                               'idea_name': idea_name,
-                               'idea_description': idea_desc,
-                               'key_features': key_features,
-                               'justification': f"High co-occurrence ({count}) suggests users compare/use {sw_name} & {top_competitor}. Opportunity to combine strengths and fix weaknesses. Demand Sw1: {demand_score}, Sw2: {comp_demand}.",
-                               'demand_score_primary_target': demand_score,
-                               'generation_method': 'fallback_cooccurrence'
-                           })
-                           processed_software.add(sw_name)
-                           # Also mark competitor as processed to avoid symmetrical idea?
-                           processed_software.add(top_competitor)
-                           ideas_generated_fallback += 1
-                           if ideas_generated_fallback >= max_fallback_ideas: break
+        logging.info(f"Generated {ideas_generated_fallback} product ideas using fallback methods.")
 
-
-        logging.info(f"Generated {ideas_generated_fallback} additional product ideas using fallback methods.")
-        # Sort all ideas by demand score of the primary target
+        # Sort all combined ideas (AI + fallback) by the demand score of the primary target software
         return sorted(product_ideas, key=lambda x: x.get('demand_score_primary_target', 0), reverse=True)
 
+
     def _analyze_sentiment(self, software_mentions_detailed: List[Dict[str, Any]]) -> Dict[str, Any]:
-        "Perform sentiment analysis on context snippets for each software."
+        """Perform sentiment analysis on context snippets for each software using TextBlob."""
         sentiment_results = {}
-        if not hasattr(self, 'sentiment_analyzer') or self.sentiment_analyzer is None:
-             logging.warning("Sentiment analyzer not available.")
+        if not hasattr(self, 'sentiment_analyzer') or self.sentiment_analyzer is None or self.sentiment_analyzer is DummyTextBlob:
+             logging.warning("Sentiment analyzer (TextBlob) not available or not installed. Skipping sentiment analysis.")
              return {}
 
+        logging.info("Performing sentiment analysis on software mention contexts...")
         for software in software_mentions_detailed:
             software_name = software['name']
-            contexts = software['context']
-            if not contexts: continue
+            contexts_with_meta = software['context']
+            if not contexts_with_meta: continue
 
             sentiment_scores = []
-            try:
-                for context in contexts:
-                    # Limit context length for TextBlob if it struggles with long strings
-                    analysis_text = context[:1000] if len(context) > 1000 else context
+            # Extract text part from context_with_meta for analysis
+            for context_meta in contexts_with_meta:
+                context_match = re.match(r"^(.*)\s+\(Source:.*,\s+Timestamp:.*\)$", context_meta, re.DOTALL)
+                context_text = context_match.group(1).strip() if context_match else context_meta
+
+                # Limit context length for analysis if necessary
+                analysis_text = context_text[:1500] if len(context_text) > 1500 else context_text
+                try:
                     blob = self.sentiment_analyzer(analysis_text)
                     sentiment_scores.append(blob.sentiment.polarity)
-            except Exception as e:
-                logging.warning(f"Sentiment analysis failed for a context of {software_name}: {e}")
-                continue # Skip this software if analysis fails repeatedly
-
+                except Exception as e:
+                    logging.warning(f"Sentiment analysis failed for context snippet of {software_name}: {e}. Snippet: {analysis_text[:100]}...")
+                    # Optionally append a neutral score or skip
+                    # sentiment_scores.append(0.0)
 
             if sentiment_scores:
                 try:
                     avg_sentiment = statistics.mean(sentiment_scores)
-                    # More nuanced categories
-                    if avg_sentiment >= 0.2: sentiment_category = 'positive'
-                    elif avg_sentiment >= 0.05: sentiment_category = 'mostly_positive'
-                    elif avg_sentiment <= -0.2: sentiment_category = 'negative'
-                    elif avg_sentiment <= -0.05: sentiment_category = 'mostly_negative'
-                    else: sentiment_category = 'neutral'
+                    std_dev_sentiment = statistics.stdev(sentiment_scores) if len(sentiment_scores) > 1 else 0.0
 
-                    sentiment_distribution = {
-                        'positive': len([s for s in sentiment_scores if s >= 0.2]),
-                        'mostly_positive': len([s for s in sentiment_scores if 0.05 <= s < 0.2]),
-                        'neutral': len([s for s in sentiment_scores if -0.05 < s < 0.05]),
-                        'mostly_negative': len([s for s in sentiment_scores if -0.2 < s <= -0.05]),
-                        'negative': len([s for s in sentiment_scores if s <= -0.2])
-                    }
+                    # Define sentiment categories based on average polarity
+                    if avg_sentiment >= 0.2: sentiment_category = 'Positive'
+                    elif avg_sentiment > 0.05: sentiment_category = 'Mostly Positive'
+                    elif avg_sentiment <= -0.2: sentiment_category = 'Negative'
+                    elif avg_sentiment < -0.05: sentiment_category = 'Mostly Negative'
+                    else: sentiment_category = 'Neutral'
+
+                    # Calculate distribution across more granular bins
+                    bins = {'Positive': 0, 'Mostly Positive': 0, 'Neutral': 0, 'Mostly Negative': 0, 'Negative': 0}
+                    for score in sentiment_scores:
+                         if score >= 0.2: bins['Positive'] += 1
+                         elif score > 0.05: bins['Mostly Positive'] += 1
+                         elif score < -0.2: bins['Negative'] += 1
+                         elif score <= -0.05: bins['Mostly Negative'] += 1
+                         else: bins['Neutral'] += 1
+
                     sentiment_results[software_name] = {
                         'average_sentiment': round(avg_sentiment, 3),
+                        'std_dev_sentiment': round(std_dev_sentiment, 3),
                         'sentiment_category': sentiment_category,
-                        'sentiment_distribution': sentiment_distribution,
-                        'sentiment_scores_sample': [round(s, 2) for s in sentiment_scores[:10]], # Sample
-                        'sample_size': len(sentiment_scores)
+                        'sentiment_distribution': bins,
+                        'sentiment_scores_sample': [round(s, 2) for s in sentiment_scores[:20]], # Larger sample
+                        'analysis_sample_size': len(sentiment_scores) # Number of contexts analyzed
                     }
                 except statistics.StatisticsError:
-                    logging.warning(f"Could not calculate sentiment statistics for {software_name} (likely no scores).")
+                    logging.warning(f"Could not calculate sentiment statistics for {software_name} (likely no valid scores).")
                 except Exception as e:
-                    logging.error(f"Unexpected error calculating sentiment stats for {software_name}: {e}")
+                    logging.error(f"Unexpected error calculating sentiment stats for {software_name}: {e}", exc_info=True)
 
-        return dict(sorted(sentiment_results.items(), key=lambda item: item[1]['average_sentiment'])) # Sort by avg sentiment
+        # Sort results by average sentiment ascending (most negative first)
+        return dict(sorted(sentiment_results.items(), key=lambda item: item[1]['average_sentiment']))
 
 
     def _perform_statistical_analysis(self, scraped_data: List[Dict[str, Any]], software_mentions_detailed: List[Dict[str, Any]], issues_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        "Perform statistical analysis on the data."
-        stats_results = {'overall': {}, 'mention_statistics': {}, 'issue_statistics': {}, 'co_occurrence': {}}
+        """Perform statistical analysis on mentions, issues, and co-occurrence."""
+        stats_results: Dict[str, Any] = {
+            'overall': {}, 'mention_statistics': {}, 'issue_statistics': {}, 'co_occurrence': {}
+        }
         num_data_points = len(scraped_data)
-        if num_data_points == 0: return stats_results
+        if num_data_points == 0:
+            logging.warning("Cannot perform statistical analysis: No data provided.")
+            return stats_results
+        if not software_mentions_detailed:
+             logging.warning("Cannot perform statistical analysis: No software mentions identified.")
+             # Provide basic overall stats anyway
+             stats_results['overall'] = {'total_data_points': num_data_points}
+             return stats_results
 
-        # Overall Stats
+        logging.info("Performing statistical analysis...")
+
+        # --- Overall Stats ---
         platform_distribution = collections.Counter(data.get('platform', 'unknown') for data in scraped_data)
         total_content_length = sum(len(self._combine_text_data([data])) for data in scraped_data)
         total_sw_mentions_count = sum(sw['mentions'] for sw in software_mentions_detailed)
+
         stats_results['overall'] = {
             'total_data_points': num_data_points,
             'total_unique_software_identified': len(software_mentions_detailed),
             'total_software_mentions': total_sw_mentions_count,
             'platform_distribution': dict(platform_distribution),
+            'average_mentions_per_software': round(total_sw_mentions_count / len(software_mentions_detailed), 2) if software_mentions_detailed else 0,
             'total_content_length_chars': total_content_length,
-            'average_content_length_chars': round(total_content_length / num_data_points, 2) if num_data_points else 0
+            'average_content_length_chars_per_item': round(total_content_length / num_data_points, 2) if num_data_points else 0
         }
 
-        # Mention Statistics
+        # --- Mention Statistics ---
         mention_counts = [software['mentions'] for software in software_mentions_detailed]
         if mention_counts:
             try:
                 mean_mentions = statistics.mean(mention_counts)
                 median_mentions = statistics.median(mention_counts)
+                # Use population stdev if considering all identified mentions as the population
+                # pstdev = statistics.pstdev(mention_counts) if len(mention_counts) > 0 else 0.0
+                # Use sample stdev if considering this a sample
                 stdev_mentions = statistics.stdev(mention_counts) if len(mention_counts) > 1 else 0.0
-                # Calculate quartiles more robustly
-                sorted_counts = sorted(mention_counts)
-                n = len(sorted_counts)
-                q1 = statistics.quantiles(mention_counts, n=4)[0] if n >= 4 else (sorted_counts[0] if n > 0 else 0)
-                q3 = statistics.quantiles(mention_counts, n=4)[2] if n >= 4 else (sorted_counts[-1] if n > 0 else 0)
+
+                # Calculate quartiles using statistics.quantiles for robustness
+                num_mentions = len(mention_counts)
+                if num_mentions >= 4:
+                    q1, _, q3 = statistics.quantiles(mention_counts, n=4)
+                elif num_mentions > 0:
+                    sorted_counts = sorted(mention_counts)
+                    q1 = sorted_counts[0] # Approximation for small samples
+                    q3 = sorted_counts[-1] # Approximation for small samples
+                else:
+                    q1 = q3 = 0
+
                 iqr = q3 - q1
+                # Define outlier thresholds (can be adjusted)
                 upper_bound = q3 + 1.5 * iqr
-                outliers = [sw['name'] for sw in software_mentions_detailed if sw['mentions'] > upper_bound]
+                lower_bound = q1 - 1.5 * iqr
+                outliers = [sw['name'] for sw, count in zip(software_mentions_detailed, mention_counts)
+                            if count > upper_bound or count < lower_bound]
+
 
                 stats_results['mention_statistics'] = {
                     'mean': round(mean_mentions, 2),
@@ -1098,409 +1382,510 @@ class DataAnalyzer:
                     'standard_deviation': round(stdev_mentions, 2),
                     'min': min(mention_counts),
                     'max': max(mention_counts),
-                    'q1': q1,
-                    'q3': q3,
-                    'iqr': iqr,
-                    'outliers_by_mentions': outliers
+                    'q1': round(q1, 2), # First Quartile
+                    'q3': round(q3, 2), # Third Quartile
+                    'iqr': round(iqr, 2), # Interquartile Range
+                    'outliers_by_mentions': outliers # List of software names considered outliers
                 }
             except statistics.StatisticsError as e:
                 logging.warning(f"Could not calculate mention statistics: {e}")
             except Exception as e:
-                logging.error(f"Unexpected error calculating mention stats: {e}")
+                logging.error(f"Unexpected error calculating mention stats: {e}", exc_info=True)
+        else:
+             stats_results['mention_statistics'] = {'message': 'No mention counts available.'}
 
 
-        # Issue Statistics
+        # --- Issue Statistics ---
         total_issues = sum(item['total_issues'] for item in issues_data)
         total_pain_points = sum(item['pain_point_summary']['count'] for item in issues_data)
         total_feature_requests = sum(item['feature_request_summary']['count'] for item in issues_data)
-        critical_pain_points = sum(item['pain_point_summary']['severity_counts']['critical'] for item in issues_data)
+        critical_pain_points = sum(item['pain_point_summary']['severity_counts'].get('critical', 0) for item in issues_data)
+        major_pain_points = sum(item['pain_point_summary']['severity_counts'].get('major', 0) for item in issues_data)
+        minor_pain_points = sum(item['pain_point_summary']['severity_counts'].get('minor', 0) for item in issues_data)
+
 
         stats_results['issue_statistics'] = {
             'total_issues_extracted': total_issues,
             'total_pain_points': total_pain_points,
             'total_feature_requests': total_feature_requests,
-            'critical_pain_point_count': critical_pain_points,
-            'avg_issues_per_software': round(total_issues / len(issues_data), 2) if issues_data else 0,
-            # Could add distribution of issue types/severities here
+            'pain_point_severity_distribution': {
+                'critical': critical_pain_points,
+                'major': major_pain_points,
+                'minor': minor_pain_points
+            },
+            'avg_issues_per_software_with_issues': round(total_issues / len(issues_data), 2) if issues_data else 0,
+            'percentage_pain_points': round(total_pain_points / total_issues * 100, 1) if total_issues else 0,
+            'percentage_feature_requests': round(total_feature_requests / total_issues * 100, 1) if total_issues else 0,
         }
 
-        # Co-occurrence Analysis (Heavy operation, consider sampling for large datasets)
-        co_occurrence_limit = 20 # Limit to top N software for co-occurrence matrix
+        # --- Co-occurrence Analysis ---
+        # Limit to top N software for performance, ensure N >= 2
+        co_occurrence_limit = min(25, len(software_mentions_detailed)) # Analyze top 25 or fewer
         top_software_names = [sw['name'] for sw in software_mentions_detailed[:co_occurrence_limit]]
-        co_occurrence: Dict[str, Dict[str, int]] = {name: {} for name in top_software_names}
-        if len(top_software_names) > 1:
-            logging.info(f"Calculating co-occurrence matrix for top {len(top_software_names)} software...")
-            for i, name1 in enumerate(top_software_names):
-                for j in range(i + 1, len(top_software_names)):
-                    name2 = top_software_names[j]
-                    co_count = 0
-                    # Optimize: Iterate data once, check for pairs
-                    for data in scraped_data:
-                        text = self._combine_text_data([data]).lower() # Lowercase once
-                        # Simple check: presence of both names
-                        try:
-                            # Use word boundaries for accuracy
-                            if re.search(r'\b' + re.escape(name1).lower() + r'\b', text) and \
-                               re.search(r'\b' + re.escape(name2).lower() + r'\b', text):
-                                co_count += 1
-                        except re.error:
-                            continue # Skip if regex fails for a name
+        co_occurrence_matrix: Dict[str, Dict[str, int]] = {name: collections.defaultdict(int) for name in top_software_names}
 
-                    if co_count > 0:
-                        co_occurrence[name1][name2] = co_count
-                        co_occurrence[name2][name1] = co_count # Symmetric matrix
+        if len(top_software_names) >= 2:
+            logging.info(f"Calculating co-occurrence matrix for top {len(top_software_names)} software...")
+            # Pre-compile regex patterns for efficiency
+            patterns = {name: re.compile(r'\b' + re.escape(name) + r'\b', re.IGNORECASE) for name in top_software_names}
+
+            for data_item in scraped_data:
+                text = self._combine_text_data([data_item])
+                if not text: continue
+                text_lower = text.lower() # Lowercase once per item
+
+                # Find which top software are present in this item
+                present_software = [name for name, pattern in patterns.items() if pattern.search(text_lower)]
+
+                # If 2 or more top software are present, increment their co-occurrence counts
+                if len(present_software) >= 2:
+                    for i in range(len(present_software)):
+                        for j in range(i + 1, len(present_software)):
+                            name1, name2 = present_software[i], present_software[j]
+                            # Increment counts symmetrically
+                            co_occurrence_matrix[name1][name2] += 1
+                            co_occurrence_matrix[name2][name1] += 1
             logging.info("Co-occurrence calculation complete.")
 
-
-        # Clean up empty entries in co_occurrence
-        stats_results['co_occurrence'] = {k: v for k, v in co_occurrence.items() if v}
+        # Clean up empty entries and convert defaultdicts to dicts for final output
+        final_co_occurrence = {
+            name: dict(counts)
+            for name, counts in co_occurrence_matrix.items() if counts # Only include software that co-occurred with others
+        }
+        stats_results['co_occurrence'] = final_co_occurrence
 
         return stats_results
 
 
     def _detect_trends(self, scraped_data: List[Dict[str, Any]], software_mentions_detailed: List[Dict[str, Any]], issues_data: List[Dict[str, Any]]) -> Dict[str, Any]:
-        "Detect trends over time for software mentions and issue types."
-        trend_results = {'software_trends': {}, 'issue_trends': {}}
-        if not scraped_data: return trend_results
+        """Detect trends over time for software mentions and potentially issue types (basic)."""
+        trend_results: Dict[str, Any] = {'software_trends': {}, 'issue_trends': {}}
+        if not scraped_data:
+            logging.warning("Cannot detect trends: No data provided.")
+            return trend_results
 
-        # Group data by date
+        logging.info("Detecting trends...")
+
+        # Group data by date (YYYY-MM-DD) using valid timestamps
         date_grouped_data: Dict[str, List[Dict[str, Any]]] = collections.defaultdict(list)
+        valid_timestamps_found = False
         for data in scraped_data:
             timestamp = data.get('timestamp')
             if timestamp:
                 try:
-                    dt = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00')).date()
-                    date_str = dt.strftime('%Y-%m-%d')
+                    # Attempt robust parsing
+                    dt_obj = datetime.datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    date_str = dt_obj.date().strftime('%Y-%m-%d')
                     date_grouped_data[date_str].append(data)
+                    valid_timestamps_found = True
                 except (ValueError, TypeError):
                     pass # Skip data points with invalid timestamps
 
-        if not date_grouped_data:
-            logging.warning("No valid timestamps found for trend analysis.")
+        if not valid_timestamps_found:
+            logging.warning("No valid timestamps found in data. Cannot perform trend analysis.")
             return trend_results
 
         sorted_dates = sorted(date_grouped_data.keys())
-        if len(sorted_dates) < 3:
-             logging.info("Not enough dates for meaningful trend analysis (need at least 3).")
-             return trend_results # Need at least 3 points for a basic trend
+        if len(sorted_dates) < 5: # Require at least 5 data points (days) for a meaningful trend line
+             logging.info(f"Not enough distinct dates with data ({len(sorted_dates)}) for robust trend analysis (need at least 5). Skipping.")
+             return trend_results
 
-        # 1. Software Mention Trends
+        # 1. Software Mention Trends (for top N software)
         logging.info("Calculating software mention trends...")
-        for software in software_mentions_detailed[:20]: # Limit to top N software
+        trend_limit = 20 # Limit trend analysis to top N software
+        top_software_for_trends = software_mentions_detailed[:trend_limit]
+
+        # Pre-compile regex patterns for trend calculation
+        trend_patterns = {sw['name']: re.compile(r'\b' + re.escape(sw['name']) + r'\b', re.IGNORECASE)
+                          for sw in top_software_for_trends}
+
+        for software in top_software_for_trends:
             software_name = software['name']
+            pattern = trend_patterns[software_name]
             daily_mentions = []
             for date in sorted_dates:
-                count = 0
+                daily_count = 0
                 for data in date_grouped_data[date]:
                     text = self._combine_text_data([data])
+                    if not text: continue
                     try:
-                        pattern = re.compile(r'\b' + re.escape(software_name) + r'\b', re.IGNORECASE)
-                        count += len(pattern.findall(text))
+                        daily_count += len(pattern.findall(text))
                     except re.error:
-                        continue
-                daily_mentions.append({'date': date, 'mentions': count})
+                        continue # Should not happen with pre-compiled patterns
+                daily_mentions.append({'date': date, 'mentions': daily_count})
 
+            # Calculate linear trend if enough data points
             trend_results['software_trends'][software_name] = self._calculate_linear_trend(daily_mentions, 'mentions')
 
-        # 2. Overall Issue Trends (Pain Points, Feature Requests)
-        logging.info("Calculating overall issue trends...")
-        daily_pain_points = []
-        daily_feature_requests = []
-        daily_critical_pain_points = []
+        # 2. Overall Issue Trends (Simplified: Total Pain Points & Feature Requests per day)
+        # TODO: This is an approximation. Accurate trend needs issues mapped to specific dates.
+        logging.info("Calculating overall issue trends (approximate by date)...")
+        daily_issues_summary = []
+        issue_keywords_flat: Dict[str, str] = {
+            kw.lower(): cat for cat, kws in ALL_ISSUE_KEYWORDS.items() for kw in kws
+        }
 
-        issues_map_by_date = collections.defaultdict(lambda: {'pain': 0, 'feature': 0, 'critical': 0})
         for date in sorted_dates:
-            for data in date_grouped_data[date]:
-                 item_url = data.get('url', 'N/A') # Find issues associated with this data item
-                 # This requires mapping issues back to original data items, which is complex.
-                 # Simpler: Approximate by checking if software mentioned in this item had issues reported overall.
-                 # More accurate: Re-analyze issues per day (computationally expensive).
-                 # Let's do a simpler aggregation for now: count issues reported *on* a specific day.
-
-                 # To do this properly, _extract_pain_points_and_features needs to associate issues with source data items.
-                 # Assuming issues_data contains references or can be mapped back.
-                 # For now, we'll just aggregate *all* mentions/issues per day as a proxy.
-                 pass # TODO: Implement accurate daily issue counting if needed. Needs refactoring of issue extraction.
-
-        # Placeholder: Calculate trend for *all* mentions as a proxy for activity
-        daily_all_mentions = []
-        for date in sorted_dates:
-            count = 0
+            daily_pain_count = 0
+            daily_feature_count = 0
             for data in date_grouped_data[date]:
                 text = self._combine_text_data([data])
-                for software in software_mentions_detailed: # Sum mentions for all software
+                if not text: continue
+                text_lower = text.lower()
+                # Check for any issue keyword presence in the day's text
+                found_pain = False
+                found_feature = False
+                for keyword, category in issue_keywords_flat.items():
                      try:
-                         pattern = re.compile(r'\b' + re.escape(software['name']) + r'\b', re.IGNORECASE)
-                         count += len(pattern.findall(text))
+                         if re.search(r'\b' + re.escape(keyword) + r'\b', text_lower):
+                              if category == 'request': found_feature = True
+                              else: found_pain = True
+                              # Optimize: break if both types found for this item
+                              if found_pain and found_feature: break
                      except re.error: continue
-            daily_all_mentions.append({'date': date, 'total_mentions': count})
 
-        trend_results['issue_trends']['overall_activity'] = self._calculate_linear_trend(daily_all_mentions, 'total_mentions')
+                if found_pain: daily_pain_count += 1 # Count item if any pain keyword found
+                if found_feature: daily_feature_count += 1 # Count item if any feature keyword found
+
+            daily_issues_summary.append({
+                'date': date,
+                'pain_point_items': daily_pain_count, # Items with potential pain points
+                'feature_request_items': daily_feature_count # Items with potential features
+            })
+
+        # Calculate trends for the aggregated daily counts
+        trend_results['issue_trends']['pain_point_activity'] = self._calculate_linear_trend(daily_issues_summary, 'pain_point_items')
+        trend_results['issue_trends']['feature_request_activity'] = self._calculate_linear_trend(daily_issues_summary, 'feature_request_items')
 
 
         return trend_results
 
     def _calculate_linear_trend(self, time_series_data: List[Dict[str, Any]], value_key: str) -> Dict[str, Any]:
-        """Calculates linear trend slope and direction for time series data."""
-        if len(time_series_data) < 3:
-            return {'trend_direction': 'insufficient_data', 'slope': 0.0, 'data_points': len(time_series_data)}
+        """Calculates linear trend slope and direction using simple linear regression."""
+        # Need at least 3 points to attempt a trend line
+        n = len(time_series_data)
+        default_result = {'trend_direction': 'insufficient_data', 'slope': 0.0, 'r_squared': 0.0, 'data_points': n}
+        if n < 3:
+            return default_result
 
-        y = [point[value_key] for point in time_series_data]
-        x = list(range(len(y))) # Simple time index
-        n = len(x)
+        y = [point.get(value_key, 0) for point in time_series_data] # Default to 0 if key missing
+        x = list(range(n)) # Time index (0, 1, 2, ...)
 
         try:
+            # Calculate sums needed for linear regression
             sum_x = sum(x)
             sum_y = sum(y)
-            sum_xy = sum(x_i * y_i for x_i, y_i in zip(x, y))
-            sum_xx = sum(x_i * x_i for x_i in x)
+            sum_xy = sum(xi * yi for xi, yi in zip(x, y))
+            sum_xx = sum(xi * xi for xi in x)
+            sum_yy = sum(yi * yi for yi in y)
 
-            # Calculate slope (handle potential division by zero)
+            # Calculate slope (m) and intercept (b) of y = mx + b
             denominator = (n * sum_xx - sum_x * sum_x)
             if denominator == 0:
+                 # Avoid division by zero; happens if all x values are the same (unlikely here)
+                 # Or if n=1 (already handled)
                  slope = 0.0
+                 intercept = sum_y / n if n > 0 else 0.0
             else:
                  slope = (n * sum_xy - sum_x * sum_y) / denominator
+                 intercept = (sum_y - slope * sum_x) / n
 
-            # Determine trend direction based on slope magnitude relative to average value
-            avg_y = sum_y / n if n > 0 else 0
-            relative_slope_threshold = 0.05 # Trend is significant if slope is > 5% of average value? Adjust threshold.
+            # Calculate R-squared (coefficient of determination) to assess fit quality
+            y_mean = sum_y / n
+            ss_total = sum((yi - y_mean) ** 2 for yi in y)
+            ss_residual = sum((yi - (slope * xi + intercept)) ** 2 for xi, yi in zip(x, y))
 
-            if avg_y != 0 and abs(slope / avg_y) > relative_slope_threshold:
-                 trend_direction = 'increasing' if slope > 0 else 'decreasing'
-            elif avg_y == 0 and slope > 0.1: # Handle zero average case
-                 trend_direction = 'increasing'
-            elif avg_y == 0 and slope < -0.1:
-                 trend_direction = 'decreasing'
+            if ss_total == 0: # Handle case where all y values are the same
+                r_squared = 1.0 if ss_residual < 1e-10 else 0.0 # Perfect fit if residuals are zero
             else:
-                 trend_direction = 'stable'
+                r_squared = 1.0 - (ss_residual / ss_total)
+                r_squared = max(0.0, min(1.0, r_squared)) # Clamp between 0 and 1
+
+            # Determine trend direction based on slope and R-squared
+            trend_direction = 'stable'
+            # Require a minimum R-squared for trend to be considered significant
+            r_squared_threshold = 0.1 # Adjust as needed (e.g., 0.1 or higher)
+            # Require slope to be significantly different from zero relative to data scale? (optional)
+            # slope_threshold = abs(y_mean * 0.01) if y_mean != 0 else 0.01 # e.g., 1% of mean value
+
+            if r_squared >= r_squared_threshold: # Check if the fit is decent
+                if slope > 0: # Consider slope magnitude later if needed
+                    trend_direction = 'increasing'
+                elif slope < 0:
+                    trend_direction = 'decreasing'
+                # else slope is near zero, keep 'stable'
 
             return {
                 'trend_direction': trend_direction,
-                'slope': round(slope, 3),
+                'slope': round(slope, 4), # Increase precision for slope
+                'intercept': round(intercept, 4),
+                'r_squared': round(r_squared, 3), # Goodness of fit (0 to 1)
                 'data_points': n,
-                'daily_values': time_series_data # Optional: include raw data
+                # Optionally include raw data for plotting:
+                # 'daily_values': time_series_data
             }
+
         except ZeroDivisionError:
              logging.warning(f"Division by zero encountered during trend calculation for key '{value_key}'.")
-             return {'trend_direction': 'error', 'slope': 0.0, 'data_points': n}
+             return {**default_result, 'trend_direction': 'error_division_by_zero'}
         except Exception as e:
-            logging.error(f"Error calculating linear trend for key '{value_key}': {e}")
-            return {'trend_direction': 'error', 'slope': 0.0, 'data_points': n}
+            logging.error(f"Error calculating linear trend for key '{value_key}': {e}", exc_info=True)
+            return {**default_result, 'trend_direction': f'error_{type(e).__name__}'}
+
 
     def _generate_ai_insights(self, software_mentions: List[Dict[str, Any]], pain_points: List[Dict[str, Any]], feature_requests: List[Dict[str, Any]], sentiment_analysis: Dict[str, Any], statistical_analysis: Dict[str, Any]) -> Dict[str, Any]:
-        """Generate comprehensive AI insights using the connected AI API."""
-        # DO NOT CHANGE GEMINI API CALL LOGIC
-        if not self.api_key or not (self.genai_client or self.genai or self.openai or self.anthropic_client):
-            return {'error': 'AI insights require a configured AI API connection'}
+        """Generate comprehensive AI insights using the connected AI API based on analysis results."""
+        # Check if AI is available and initialized
+        ai_available = bool(self.api_key and (self.genai or self.genai_client or self.openai or self.anthropic_client))
+        if not ai_available:
+            return {'error': 'AI insights require a configured and successfully initialized AI API connection'}
 
-        logging.info("Preparing data for AI insight generation...")
-        # --- Prepare concise summaries for the prompt ---
-        top_sw_mentions = software_mentions[:10] # Top 10 mentioned
-        top_demand_sw = sorted(
-            [{'name': k, 'demand_score': v.get('demand_score', 0)} for k, v in self.demand_metrics.items()], # Use self.demand_metrics if available
+        logging.info(f"Preparing data for AI insight generation ({self.api_type})...")
+
+        # --- Prepare Concise Summaries for the Prompt ---
+        # Use detailed mentions list passed as argument
+        top_sw_mentions_summary = [{'name': sw['name'], 'mentions': sw['mentions']} for sw in software_mentions[:10]]
+
+        # Use demand metrics stored in self.demand_metrics
+        top_demand_sw_summary = sorted(
+            [{'name': k, 'demand_score': v.get('demand_score', 0)} for k, v in self.demand_metrics.items()],
             key=lambda x: x['demand_score'], reverse=True
-        )[:10] if hasattr(self, 'demand_metrics') else top_sw_mentions # Fallback if demand metrics not computed yet
+        )[:10]
 
+        # Summarize top pain points (more detail)
         top_pain_points_summary = []
-        for pp_group in pain_points[:5]: # Top 5 software with pain points
+        for pp_group in pain_points[:7]: # Focus on top 7 software with pain points
             summary = {
                 "software": pp_group['software'],
                 "total_pain_points": pp_group['pain_point_summary']['count'],
-                "critical_count": pp_group['pain_point_summary']['severity_counts']['critical'],
-                "major_count": pp_group['pain_point_summary']['severity_counts']['major'],
-                "top_issues": [iss['context'][:100]+'...' for iss in pp_group['issues'] if iss['type']=='pain_point'][:3]
+                "severity_counts": pp_group['pain_point_summary']['severity_counts'],
+                 # Include a few context examples, simplified
+                "top_issue_examples": [
+                    f"{iss['severity']}: {re.sub(r'\\s+\\(Source:.*?\\)', '', iss['context'])[:100]}..."
+                    for iss in pp_group['issues']
+                    if iss['type']=='pain_point' and iss.get('severity')
+                ][:3] # Top 3 examples
             }
             top_pain_points_summary.append(summary)
 
+        # Summarize top feature requests (more detail)
         top_feature_requests_summary = []
-        # Sort feature requests by count and associate with software
-        fr_counts = collections.Counter(fr['software'] for fr in feature_requests)
-        top_fr_sw = fr_counts.most_common(5)
-        for sw_name, count in top_fr_sw:
-             requests = [iss['context'][:100]+'...' for fr_group in feature_requests if fr_group['software'] == sw_name for iss in fr_group['issues'] if iss['type']=='feature_request']
-             summary = {
-                  "software": sw_name,
-                  "request_count": count,
-                  "top_requests": requests[:3]
-             }
-             top_feature_requests_summary.append(summary)
+        # Sort software by feature request count
+        fr_counts = {fr['software']: fr['feature_request_summary']['count'] for fr in feature_requests if fr['feature_request_summary']['count'] > 0}
+        top_fr_sw_names = sorted(fr_counts, key=fr_counts.get, reverse=True)[:7] # Top 7 software by FR count
+
+        for sw_name in top_fr_sw_names:
+             # Find the corresponding feature request group
+             fr_group = next((fr for fr in feature_requests if fr['software'] == sw_name), None)
+             if fr_group:
+                 requests_examples = [
+                     f"{re.sub(r'\\s+\\(Source:.*?\\)', '', iss['context'])[:100]}..."
+                     for iss in fr_group['issues'] if iss['type']=='feature_request'
+                 ][:3] # Top 3 examples
+
+                 summary = {
+                      "software": sw_name,
+                      "request_count": fr_group['feature_request_summary']['count'],
+                      "top_request_examples": requests_examples
+                 }
+                 top_feature_requests_summary.append(summary)
 
 
-        top_sentiment = {k: v for k, v in list(sentiment_analysis.items())[:10]} # Top 10 by avg sentiment (default sort)
-        positive_sentiment = sorted([(k, v) for k,v in sentiment_analysis.items() if v['average_sentiment'] > 0.1], key=lambda item: item[1]['average_sentiment'], reverse=True)[:5]
-        negative_sentiment = sorted([(k, v) for k,v in sentiment_analysis.items() if v['average_sentiment'] < -0.1], key=lambda item: item[1]['average_sentiment'])[:5]
+        # Sentiment Highlights (already sorted by _analyze_sentiment)
+        positive_sentiment_summary = {
+            k: {'avg_sentiment': v['average_sentiment'], 'category': v['sentiment_category']}
+            for k, v in list(reversed(list(sentiment_analysis.items())))[:5] # Top 5 most positive
+            if v['average_sentiment'] > 0.05
+        }
+        negative_sentiment_summary = {
+            k: {'avg_sentiment': v['average_sentiment'], 'category': v['sentiment_category']}
+            for k, v in list(sentiment_analysis.items())[:5] # Top 5 most negative (already sorted this way)
+            if v['average_sentiment'] < -0.05
+        }
 
-
+        # Statistical Summary (simplify for prompt)
         stats_summary = {
-            "overall": statistical_analysis.get("overall", {}),
-            "mention_stats": statistical_analysis.get("mention_statistics", {}),
-            "issue_stats": statistical_analysis.get("issue_statistics", {}),
-            "top_cooccurring_pairs": [(k, list(v.keys())[:2]) for k,v in statistical_analysis.get("co_occurrence", {}).items()][:5]
+            "overall": {
+                "total_data_points": statistical_analysis.get("overall", {}).get("total_data_points"),
+                "total_unique_software": statistical_analysis.get("overall", {}).get("total_unique_software_identified"),
+                "total_mentions": statistical_analysis.get("overall", {}).get("total_software_mentions"),
+            },
+            "issue_stats": {
+                "total_issues": statistical_analysis.get("issue_statistics", {}).get("total_issues_extracted"),
+                "perc_pain_points": statistical_analysis.get("issue_statistics", {}).get("percentage_pain_points"),
+                "critical_pain_points": statistical_analysis.get("issue_statistics", {}).get("pain_point_severity_distribution", {}).get("critical"),
+            },
+            # Select top 3 co-occurring pairs based on count
+            "top_cooccurring_pairs": sorted(
+                 [(k, partner, count) for k, partners in statistical_analysis.get("co_occurrence", {}).items() for partner, count in partners.items() if k < partner], # Avoid duplicates
+                 key=lambda x: x[2], reverse=True
+             )[:3] # Top 3 pairs by count
         }
 
         # --- Construct the AI Prompt ---
         prompt = f"""
-        Analyze the following consolidated data from online community discussions (Reddit, Twitter, YouTube, Product Hunt etc.) about various software tools. Provide a comprehensive market analysis and strategic insights report.
+        Analyze the following consolidated data from online discussions about software tools. Provide a concise market analysis and strategic insights report, formatted as a JSON object.
 
         **Input Data Summary:**
 
-        1.  **Top Mentioned Software (Max 10):**
-            {json.dumps(top_sw_mentions, indent=2)}
-
-        2.  **Top Software by Demand Score (Max 10 - higher score indicates more buzz/engagement):**
-            {json.dumps(top_demand_sw, indent=2)}
-
-        3.  **Key Pain Points (Focus on software with most/critical issues, Max 5):**
-            {json.dumps(top_pain_points_summary, indent=2)}
-
-        4.  **Key Feature Requests (Focus on software with most requests, Max 5):**
-            {json.dumps(top_feature_requests_summary, indent=2)}
-
-        5.  **Sentiment Analysis Highlights:**
-            - Top 5 Most Positively Viewed: {json.dumps(dict(positive_sentiment), indent=2)}
-            - Top 5 Most Negatively Viewed: {json.dumps(dict(negative_sentiment), indent=2)}
-
-        6.  **Statistical Highlights:**
-            {json.dumps(stats_summary, indent=2)}
+        1.  **Top Mentioned Software:** {json.dumps(top_sw_mentions_summary, indent=2)}
+        2.  **Top Software by Demand Score:** {json.dumps(top_demand_sw_summary, indent=2)}
+        3.  **Software with Most/Critical Pain Points:** {json.dumps(top_pain_points_summary, indent=2)}
+        4.  **Software with Most Feature Requests:** {json.dumps(top_feature_requests_summary, indent=2)}
+        5.  **Sentiment Highlights:**
+            - Most Positively Viewed: {json.dumps(positive_sentiment_summary, indent=2)}
+            - Most Negatively Viewed: {json.dumps(negative_sentiment_summary, indent=2)}
+        6.  **Statistical Highlights:** {json.dumps(stats_summary, indent=2)}
 
         **Analysis Report Sections (Respond ONLY with a valid JSON object containing these keys):**
 
-        1.  `market_overview`: Briefly describe the software landscape based on mentions, demand, and platform distribution. Which types of software are most discussed?
-        2.  `key_pain_point_themes`: Identify 2-4 major recurring themes or categories of problems users face across different software (e.g., "Usability Challenges", "High Cost", "Performance Bottlenecks", "Integration Gaps", "Poor Support"). Justify with examples from the data.
-        3.  `top_feature_demand_themes`: What are 2-4 major categories of features users are requesting? (e.g., "AI Capabilities", "Better Collaboration", "Mobile Access", "Customization Options"). Justify with examples.
-        4.  `opportunity_assessment`: Based *only* on the provided data (high demand, significant pain points/feature requests, negative sentiment), identify the 3-5 most promising opportunities for new products or major improvements. For each, mention the target software and the core problem/need it addresses.
-        5.  `competitive_insights`: Analyze the relationships between software. Are there clear competitors based on co-occurrence or sentiment? Are users switching between tools?
-        6.  `sentiment_summary`: Summarize the overall user sentiment. Are users generally satisfied or dissatisfied? Are there specific tools that evoke strong positive or negative reactions?
-        7.  `strategic_recommendations`: Provide 2-3 actionable recommendations for developers looking to enter this market or improve existing tools, based directly on the analysis.
-        8.  `potential_risks_or_gaps`: Briefly mention any potential risks (e.g., strong incumbent, niche market) or gaps in the data (e.g., lack of pricing discussion) suggested by the analysis.
+        1.  `market_overview` (string): Briefly describe the software landscape based on mentions, demand. What types of tools are popular?
+        2.  `key_pain_point_themes` (list of strings): Identify 2-4 major recurring categories of problems users face (e.g., "Performance/Stability", "Usability/UX", "Cost/Pricing", "Integration Issues"). Justify briefly with examples from the data summary.
+        3.  `top_feature_demand_themes` (list of strings): What are 2-4 major categories of features users want (e.g., "AI Features", "Collaboration Enhancements", "API/Integrations", "Customization")? Justify briefly.
+        4.  `opportunity_assessment` (list of objects): Identify the 2-4 most promising opportunities for new products or improvements based *only* on the provided data (high demand + issues/requests). Each object should have: `{"opportunity": "Brief description", "target_software": ["Relevant SW"], "justification": "Link to specific pain/request & demand"}`.
+        5.  `competitive_insights` (string): Analyze relationships. Clear competitors? Users comparing tools (based on co-occurrence)? Tools with very negative sentiment likely losing users?
+        6.  `sentiment_summary` (string): Overall user sentiment trend? Tools with polarized views?
+        7.  `strategic_recommendations` (list of strings): Provide 2-3 actionable recommendations for developers based *directly* on the analysis (e.g., "Focus on improving stability for Tool X", "Develop integrations for Tool Y").
+        8.  `potential_risks_or_gaps` (string): Briefly note risks (e.g., dominant players) or data gaps suggested by the analysis.
 
-        **Ensure your entire response is a single, valid JSON object.**
+        **Strictly format your entire response as a single, valid JSON object.**
         ```json
         {{
           "market_overview": "...",
-          "key_pain_point_themes": ["Theme 1: ...", "Theme 2: ..."],
-          "top_feature_demand_themes": ["Theme A: ...", "Theme B: ..."],
+          "key_pain_point_themes": ["Theme 1: Description...", "Theme 2: Description..."],
+          "top_feature_demand_themes": ["Theme A: Description...", "Theme B: Description..."],
           "opportunity_assessment": [
             {{"opportunity": "...", "target_software": ["..."], "justification": "..."}},
             {{...}}
           ],
           "competitive_insights": "...",
           "sentiment_summary": "...",
-          "strategic_recommendations": ["Recommendation 1: ...", "Recommendation 2: ..."],
+          "strategic_recommendations": ["Rec 1: ...", "Rec 2: ..."],
           "potential_risks_or_gaps": "..."
         }}
         ```
         """
 
-        logging.info(f"Sending prompt (length: {len(prompt)} chars) to {self.api_type} for insights...")
-        ai_insights = {'error': 'AI analysis failed to generate'} # Default error
+        logging.info(f"Sending prompt (approx length: {len(prompt)} chars) to {self.api_type} for insights...")
+        ai_insights_result: Dict[str, Any] = {'error': f'AI analysis failed to generate using {self.api_type}'} # Default error
 
         try:
-            # --- Execute AI Call (Gemini logic unchanged as per request) ---
+            # --- Execute AI Call ---
             raw_ai_output = None
-            if self.api_type == 'gemini' and (self.genai_client or self.genai):
-                # Determine which Gemini object to use based on initialization
-                if self.genai_client and hasattr(self.genai_client, 'generate_content'):
-                     logging.warning("Using model 'gemini-2.0-flash' for insights as specified.")
-                     response = self.genai_client.generate_content(model='models/gemini-1.5-flash-latest', contents=prompt) # Match model identifier
-                     raw_ai_output = response.text
-                elif self.genai and hasattr(self.genai, 'models') and hasattr(self.genai.models, 'generate_content'):
-                     logging.warning("Using model 'gemini-2.0-flash' via genai.models.generate_content for insights.")
-                     response = self.genai.models.generate_content(model='models/gemini-1.5-flash-latest', contents=prompt) # Match model identifier
-                     raw_ai_output = response.text
-                else:
-                     logging.error("Gemini AI object not configured correctly for content generation.")
-                     ai_insights['error'] = "Gemini AI object not configured correctly."
+            model_to_use = 'models/gemini-1.5-flash-latest' # Default Gemini model
 
+            if self.api_type == 'gemini' and (self.genai or self.genai_client):
+                if self.genai and hasattr(self.genai, 'GenerativeModel'):
+                    logging.info(f"Using Gemini model '{model_to_use}' via configured genai module for insights.")
+                    model = self.genai.GenerativeModel(model_to_use)
+                    # Consider adding specific safety settings if generating sensitive content summaries
+                    response = model.generate_content(prompt) #, safety_settings=...)
+                    raw_ai_output = response.text
+                elif self.genai_client and hasattr(self.genai_client, 'generate_content'):
+                    logging.warning(f"Using Gemini model '{model_to_use}' via genai.Client instance for insights.")
+                    response = self.genai_client.generate_content(model=model_to_use, contents=prompt) # Adapt call if needed
+                    raw_ai_output = response.text
+                else:
+                    logging.error("Gemini AI object not configured correctly for insights generation.")
+                    ai_insights_result['error'] = "Gemini AI object not configured correctly."
 
             elif self.api_type == 'openai' and self.openai:
-                 response = self.openai.chat.completions.create(
-                     model="gpt-4o-mini", # Capable model for structured JSON
+                logging.info("Using OpenAI model 'gpt-4o-mini' for insights.")
+                response = self.openai.chat.completions.create(
+                     model="gpt-4o-mini", # Good balance for structured JSON output
                      response_format={"type": "json_object"},
                      messages=[
-                         {'role': 'system', 'content': 'You analyze software market data and generate strategic insights as a JSON object.'},
+                         {'role': 'system', 'content': 'You analyze software market data and generate strategic insights as a single JSON object.'},
                          {'role': 'user', 'content': prompt}
-                     ]
+                     ],
+                     temperature=0.5 # Slightly more deterministic for JSON structure
                  )
-                 raw_ai_output = response.choices[0].message.content
+                raw_ai_output = response.choices[0].message.content
 
             elif self.api_type == 'anthropic' and self.anthropic_client:
-                 response = self.anthropic_client.messages.create(
+                logging.info("Using Anthropic model 'claude-3-haiku-20240307' for insights.")
+                response = self.anthropic_client.messages.create(
                      model="claude-3-haiku-20240307", # Fast model
-                     max_tokens=3500, # Allow ample space for detailed JSON
-                     messages=[{'role': 'user', 'content': prompt}]
+                     max_tokens=3500, # Allow ample space for detailed JSON response
+                     messages=[{'role': 'user', 'content': prompt}],
+                     temperature=0.5
                  )
-                 raw_ai_output = response.content[0].text
+                raw_ai_output = response.content[0].text
 
             # --- Process AI Response ---
             if raw_ai_output:
-                logging.info(f"Received raw response from {self.api_type} (length: {len(raw_ai_output)} chars).")
-                # Extract JSON object robustly (handles potential markdown ```json ... ```)
-                json_match = re.search(r'\{\s*"market_overview":.*\}', raw_ai_output, re.DOTALL | re.IGNORECASE)
+                logging.info(f"Received raw response from {self.api_type} (length: {len(raw_ai_output)} chars). Attempting to parse JSON...")
+                # Extract JSON object robustly (handles potential markdown ```json ... ``` fences)
+                json_match = re.search(r'```json\s*(\{.*?\})\s*```', raw_ai_output, re.DOTALL | re.IGNORECASE)
+                if not json_match: # Fallback to finding any JSON object if no markdown fence
+                     json_match = re.search(r'(\{.*?\})', raw_ai_output, re.DOTALL | re.IGNORECASE)
+
                 if json_match:
-                    extracted_json = json_match.group(0)
+                    extracted_json_str = json_match.group(1)
                     try:
-                        ai_insights = json.loads(extracted_json)
-                        # Basic validation
-                        required_keys = ["market_overview", "key_pain_point_themes", "top_feature_demand_themes", "opportunity_assessment", "competitive_insights", "sentiment_summary", "strategic_recommendations", "potential_risks_or_gaps"]
-                        if all(key in ai_insights for key in required_keys):
+                        parsed_json = json.loads(extracted_json_str)
+                        # Basic validation: Check if it's a dictionary and contains expected top-level keys
+                        required_keys = ["market_overview", "key_pain_point_themes", "top_feature_demand_themes",
+                                         "opportunity_assessment", "competitive_insights", "sentiment_summary",
+                                         "strategic_recommendations", "potential_risks_or_gaps"]
+                        if isinstance(parsed_json, dict) and all(key in parsed_json for key in required_keys):
                              logging.info(f"Successfully parsed valid JSON insights from {self.api_type}.")
-                             return ai_insights # Success
+                             return parsed_json # Success! Return the parsed dictionary
                         else:
-                             missing_keys = [key for key in required_keys if key not in ai_insights]
+                             missing_keys = [key for key in required_keys if key not in parsed_json]
                              logging.warning(f"AI response JSON is missing required keys: {missing_keys}")
-                             ai_insights = {'error': f"AI response missing keys: {missing_keys}", 'raw_response': extracted_json}
+                             ai_insights_result = {'error': f"AI response missing keys: {missing_keys}", 'raw_response_snippet': extracted_json_str[:500]}
 
                     except json.JSONDecodeError as e:
-                        logging.error(f"Failed to decode JSON from AI response: {e}. Raw matched JSON: {extracted_json[:500]}...")
-                        # Attempt to find *any* JSON object as a fallback
-                        any_json_match = re.search(r'\{.*\}', raw_ai_output, re.DOTALL)
-                        if any_json_match:
-                             ai_insights = {'error': f'JSONDecodeError: {e}. Found fallback JSON.', 'raw_response': any_json_match.group(0)}
-                        else:
-                             ai_insights = {'error': f'JSONDecodeError: {e}. No JSON object found.', 'raw_response': raw_ai_output}
+                        logging.error(f"Failed to decode JSON from AI response: {e}. Raw matched JSON starts: {extracted_json_str[:500]}...")
+                        ai_insights_result = {'error': f'JSONDecodeError: {e}', 'raw_response_snippet': extracted_json_str[:500]}
                 else:
-                    logging.warning(f"Could not find the expected JSON structure in the AI response.")
-                    ai_insights = {'error': 'Could not find valid JSON object in AI response.', 'raw_response': raw_ai_output}
+                    logging.warning("Could not find any JSON object structure (`{...}`) in the AI response.")
+                    ai_insights_result = {'error': 'Could not find JSON object in AI response.', 'raw_response_snippet': raw_ai_output[:500]}
             else:
-                 logging.warning(f"Received no output from {self.api_type}.")
-                 ai_insights['error'] = f"No output received from {self.api_type}."
-
+                 logging.warning(f"Received no output from {self.api_type} for AI insights.")
+                 ai_insights_result['error'] = f"No output received from {self.api_type}."
 
         except Exception as e:
-            logging.error(f"Error generating AI insights with {self.api_type}: {e}", exc_info=True)
-            ai_insights = {'error': f"Failed to generate AI insights with {self.api_type}: {str(e)}"}
+            logging.error(f"An error occurred generating AI insights with {self.api_type}: {e}", exc_info=True)
+            ai_insights_result = {'error': f"Failed to generate AI insights with {self.api_type}: {str(e)}"}
 
-        return ai_insights
+        return ai_insights_result # Return dictionary possibly containing an error
 
 
     def generate_ai_analysis(self, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
         """
         Generate comprehensive AI analysis based on previously computed results.
-        This acts as a wrapper around _generate_ai_insights using results dict.
+        This acts as a public wrapper around _generate_ai_insights using the results dict.
+
+        Args:
+            analysis_results: The dictionary returned by the `analyze_data` method.
+
+        Returns:
+            A dictionary containing the AI-generated insights, or an error message.
         """
-        if not self.api_key:
-            return {'error': 'AI analysis requires an API key'}
+        ai_available = bool(self.api_key and (self.genai or self.genai_client or self.openai or self.anthropic_client))
+        if not ai_available:
+            return {'error': 'AI analysis requires a configured and successfully initialized AI API connection'}
 
         # Extract necessary data from the results dictionary
-        software_mentions = analysis_results.get('software_mentions', [])
+        # Use detailed mentions if available, otherwise fallback to simplified list
+        software_mentions_det = analysis_results.get('software_mentions_detailed', analysis_results.get('software_mentions', [])) # Attempt to find detailed list if stored
         pain_points = analysis_results.get('pain_points', [])
         feature_requests = analysis_results.get('feature_requests', [])
         sentiment_analysis = analysis_results.get('sentiment_analysis', {})
         statistical_analysis = analysis_results.get('statistical_analysis', {})
 
-        # Store demand metrics if needed for the generation function
-        # This assumes _generate_ai_insights might internally use self.demand_metrics
-        if 'demand_metrics' in analysis_results:
-             self.demand_metrics = analysis_results['demand_metrics']
+        # Ensure demand metrics are available on the instance if needed by the internal method
+        # (Current implementation accesses self.demand_metrics directly)
+        self.demand_metrics = analysis_results.get('demand_metrics', self.demand_metrics) # Update if provided
 
-        logging.info("Calling _generate_ai_insights with provided analysis results...")
-        ai_analysis = self._generate_ai_insights(
-            software_mentions,
+        logging.info("Calling internal _generate_ai_insights with provided analysis results...")
+        ai_analysis_results = self._generate_ai_insights(
+            software_mentions_det, # Pass the most detailed list available
             pain_points,
             feature_requests,
             sentiment_analysis,
             statistical_analysis
         )
-        return ai_analysis
+        return ai_analysis_results
