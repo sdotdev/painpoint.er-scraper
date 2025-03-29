@@ -1,10 +1,10 @@
-# PainPoint.er Search 🔍
+# PainPoint.er Scraper 🔍
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## Discover Software Pain Points & Product Opportunities
 
-PainPoint.er Search is a powerful, open-source tool that helps entrepreneurs, product managers, and developers identify software pain points and product opportunities by analyzing user feedback from various online communities.
+PainPoint.er Scraper is a powerful, open-source tool that helps entrepreneurs, product managers, and developers identify software pain points and product opportunities by analyzing user feedback from various online communities.
 
 ### 🚀 Key Features
 
@@ -110,7 +110,7 @@ youtube.com/watch?v=example_video_id,video_editing,Video with many comments
 
 ## 📊 Output Format
 
-PainPoint.er Search generates several output files:
+PainPoint.er Scraper generates several output files:
 
 1. `painpointer_results.csv` - Main results with product ideas and demand scores
 2. `painpointer_results_software.csv` - Detailed software mentions
@@ -134,7 +134,7 @@ PainPoint.er Search generates several output files:
 
 ## 🤖 AI Integration
 
-PainPoint.er Search supports multiple AI providers for enhanced analysis. You can provide API keys in two ways:
+PainPoint.er Scraper supports multiple AI providers for enhanced analysis. You can provide API keys in two ways:
 
 ### Using Environment Variables (Recommended)
 
@@ -190,7 +190,7 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📂 Project Structure
 
-PainPoint.er Search has been modularized for better maintainability and extensibility:
+PainPoint.er Scraper has been modularized for better maintainability and extensibility:
 
 ```
 ├── main.py                 # Main entry point script
@@ -219,9 +219,9 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ---
 
-## 🔍 Why PainPoint.er Search?
+## 🔍 Why PainPoint.er Scraper?
 
-In today's competitive software landscape, understanding user pain points is crucial for building successful products. PainPoint.er Search automates the process of discovering what users are struggling with and where opportunities exist for new or improved software solutions.
+In today's competitive software landscape, understanding user pain points is crucial for building successful products. PainPoint.er Scraper automates the process of discovering what users are struggling with and where opportunities exist for new or improved software solutions.
 
 By analyzing real user feedback across multiple platforms, you can:
 
@@ -231,4 +231,4 @@ By analyzing real user feedback across multiple platforms, you can:
 - **Understand competitor weaknesses** to exploit
 - **Generate new product ideas** backed by evidence
 
-Whether you're a solo entrepreneur, product manager, or part of a development team, PainPoint.er Search helps you make data-driven decisions about what to build next.
+Whether you're a solo entrepreneur, product manager, or part of a development team, PainPoint.er Scraper helps you make data-driven decisions about what to build next.
