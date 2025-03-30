@@ -53,7 +53,7 @@ def main():
     parser.add_argument('-d', '--days', type=int, default=7, help='Number of days to look back (default: 7)')
     parser.add_argument('-o', '--output', default='./output', help='Output directory for results (default: ./output)')
     parser.add_argument('-k', '--api-key', help='API key for AI analysis (optional)')
-    parser.add_argument('-a', '--api-type', default='gemini', choices=['gemini', 'openai', 'anthropic', 'none'], 
+    parser.add_argument('-a', '--api-type', default='gemini', choices=['gemini', 'openai', 'anthropic', 'deepseek', 'none'], 
                         help='AI API to use for analysis (default: gemini)')
     
     # Parse known args to handle missing arguments interactively
@@ -82,6 +82,7 @@ def main():
     gemini_key = os.environ.get('GEMINI_API_KEY')
     openai_key = os.environ.get('OPENAI_API_KEY')
     anthropic_key = os.environ.get('ANTHROPIC_API_KEY')
+    github_token = os.environ.get('GITHUB_TOKEN')  # For DeepSeek-V3
     
     # Determine default API type based on available keys
     default_api_type = args.api_type  # Start with command-line default
@@ -92,6 +93,8 @@ def main():
             default_api_type = 'openai'
         elif anthropic_key:
             default_api_type = 'anthropic'
+        elif github_token:
+            default_api_type = 'deepseek'
     
     # Get default API key based on selected API type
     default_api_key = None
@@ -101,6 +104,8 @@ def main():
         default_api_key = openai_key
     elif default_api_type == 'anthropic':
         default_api_key = anthropic_key
+    elif default_api_type == 'deepseek':
+        default_api_key = github_token
     
     # Prompt for API key if not provided via command line
     if '--api-key' not in sys.argv and '-k' not in sys.argv:
@@ -115,7 +120,7 @@ def main():
         if default_api_key:
             api_type_prompt += f" (using {default_api_type} from .env)"
         args.api_type = get_input_with_default(api_type_prompt, default_api_type)
-        if args.api_type not in ['gemini', 'openai', 'anthropic', 'none']:
+        if args.api_type not in ['gemini', 'openai', 'anthropic', 'deepseek', 'none']:
             print(f"Warning: '{args.api_type}' is not a valid API type. Using default: {default_api_type}")
             args.api_type = default_api_type
     
