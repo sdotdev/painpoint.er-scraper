@@ -1,1 +1,0 @@
-"""Console utilities for PainPoint.er Search."""
