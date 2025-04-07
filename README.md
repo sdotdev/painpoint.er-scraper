@@ -4,15 +4,15 @@
 
 ## Discover Software Pain Points & Product Opportunities
 
-PainPoint.er Scraper is a powerful, open-source tool that helps entrepreneurs, product managers, and developers identify software pain points and product opportunities by analyzing user feedback from various online communities.
+PainPoint.er Scraper is an open-source tool that helps entrepreneurs, product managers, and developers identify software pain points and product opportunities by analyzing user feedback from Reddit communities.
 
 ### 🚀 Key Features
 
-- **Multi-Platform Analysis**: Scrape and analyze user feedback from Reddit, Twitter, YouTube, ProductHunt, and more
+- **Platform Analysis**: Scrape and analyze user feedback from Reddit communities, and more platforms being added soon
 - **Pain Point Identification**: Automatically detect user complaints and frustrations with existing software
-- **Opportunity Scoring**: Calculate demand metrics to prioritize the most promising product ideas
-- **AI-Powered Insights**: Leverage Google's Gemini AI (with support for OpenAI and Anthropic) for deeper analysis
-- **Comprehensive Reporting**: Generate detailed CSV and JSON reports with actionable insights
+- **AI-Powered Insights**: Leverage OpenAI or Azure/GitHub Models API for analysis
+- **Modular Design**: Easily extendable architecture for adding more data sources in the future
+- **Simple Reporting**: Generate analysis results with actionable insights
 
 ## 📋 Table of Contents
 
@@ -38,7 +38,7 @@ PainPoint.er Scraper is a powerful, open-source tool that helps entrepreneurs, p
 1. Clone the repository:
 
 ```bash
-git clone https://github.com/yourusername/painpointer-search.git
+git clone https://github.com/sdotdev/painpointer-search.git
 cd painpointer-search
 ```
 
@@ -50,133 +50,138 @@ pip install -r requirements.txt
 
 ## 🚀 Quick Start
 
-Run a basic analysis with default settings:
+1. Copy `.env.example` to `.env` and add your API keys:
+   - Reddit API credentials (required)
+   - OpenAI API key or Azure/GitHub API key (at least one required)
+
+2. Run the application:
 
 ```bash
-python main.py your_urls.csv
+python main.py
 ```
 
 This will:
-1. Process URLs from `your_urls.csv`
-2. Scrape data from the last 7 days
-3. Analyze for software mentions and pain points
-4. Generate product ideas based on identified opportunities
-5. Save results to the `./output` directory
+1. Load your configuration from `.env`
+2. Prompt you to choose an AI provider (OpenAI or Azure)
+3. Process URLs from `urls.csv`
+4. Scrape comments from Reddit subreddits
+5. Analyze the comments for pain points and opportunities
+6. Save results to the `./output` directory
 
 ## 💡 Usage Examples
 
 ### Basic Usage
 
 ```bash
-python main.py urls.csv
+python main.py
 ```
 
-### Specify Lookback Period
+### Customizing the Configuration
 
-```bash
-python main.py urls.csv --days 30
+Edit the `.env` file to customize your configuration:
+
+```
+# Reddit API Credentials (Required)
+REDDIT_CLIENT_ID="your_reddit_client_id"
+REDDIT_CLIENT_SECRET="your_reddit_client_secret"
+REDDIT_USER_AGENT="your_reddit_user_agent"
+
+# AI API Keys (At least one required)
+OPENAI_API_KEY="your_openai_api_key"
+AZURE_GITHUB_API_KEY="your_azure_github_api_key"
 ```
 
-### Custom Output Directory
+### Customizing URLs to Scrape
 
-```bash
-python main.py urls.csv --output ./my_results
+Edit the `urls.csv` file to specify which subreddits to analyze:
+
 ```
-
-### With AI Analysis (Google Gemini)
-
-```bash
-python main.py urls.csv --api-key YOUR_GEMINI_API_KEY
-```
-
-### With Alternative AI Provider
-
-```bash
-python main.py urls.csv --api-key YOUR_API_KEY --api-type openai
+url,category,notes
+https://reddit.com/r/productivity,productivity,Popular productivity subreddit
+https://reddit.com/r/software,software,Discussions about various software
 ```
 
 ## 📄 Input Format
 
-The input CSV file must contain a column named `url` with the URLs to analyze. Additional columns are preserved and included in the analysis results.
+The input CSV file must contain a column named `url` with the Reddit URLs to analyze. Additional columns are preserved for reference.
 
 Example `urls.csv`:
 
 ```
 url,category,notes
 https://reddit.com/r/productivity,productivity,Popular productivity subreddit
-twitter.com/search?q=notion%20issues,note-taking,Search for Notion issues
-youtube.com/watch?v=example_video_id,video_editing,Video with many comments
+https://reddit.com/r/software,software,Discussions about various software
+https://reddit.com/r/SaaS,saas,Software as a Service discussions
 ```
+
+**Note:** Currently, only Reddit URLs are supported. Non-Reddit URLs in the CSV will be skipped.
 
 ## 📊 Output Format
 
-PainPoint.er Scraper generates several output files:
+PainPoint.er Scraper generates a single output file in the `output` directory:
 
-1. `painpointer_results.csv` - Main results with product ideas and demand scores
-2. `painpointer_results_software.csv` - Detailed software mentions
-3. `painpointer_results_pain_points.csv` - Identified pain points
-4. `painpointer_results_demand.csv` - Demand metrics by platform
-5. `painpointer_results_ideas.csv` - Generated product ideas
-6. `painpointer_results.json` - Complete results in JSON format
-7. `raw_data.json` - Raw scraped data
+```
+[ai_provider]_analysis_[timestamp].txt
+```
+
+For example: `openai_analysis_20230615_123045.txt`
+
+This file contains the analysis results from the AI provider, including identified:
+- Product opportunities
+- Feature requests
+- Pain points
+- New tool suggestions
 
 ## ⚙️ Advanced Configuration
 
-### Command Line Arguments
+### Configuration Options
 
-| Argument | Description | Default |
-|----------|-------------|--------|
-| `csv_file` | CSV file with URLs to analyze | urls.csv |
-| `-d, --days` | Number of days to look back | 7 |
-| `-o, --output` | Output directory for results | ./output |
-| `-k, --api-key` | API key for AI analysis | (Optional) |
-| `-a, --api-type` | AI API to use (gemini, openai, anthropic, none) | gemini |
+The application uses a configuration loaded from the `.env` file and the `config.py` module. You can modify these settings:
+
+| Setting | Description | Location |
+|---------|-------------|----------|
+| `reddit_client_id` | Reddit API client ID | .env file |
+| `reddit_client_secret` | Reddit API client secret | .env file |
+| `reddit_user_agent` | Reddit API user agent | .env file |
+| `openai_api_key` | OpenAI API key | .env file |
+| `azure_github_api_key` | Azure/GitHub Models API key | .env file |
+| `urls_file` | CSV file with URLs to analyze | config.py |
+| `output_dir` | Output directory for results | config.py |
 
 ## 🤖 AI Integration
 
-PainPoint.er Scraper supports multiple AI providers for enhanced analysis. You can provide API keys in two ways:
+PainPoint.er Scraper supports two AI providers for analysis:
 
-### Using Environment Variables (Recommended)
+### 1. OpenAI
 
-Create a `.env` file in the project root with your API keys:
+To use OpenAI's models (default: gpt-3.5-turbo):
+
+1. Add your OpenAI API key to the `.env` file:
 
 ```
-# Google Gemini API Key
-GEMINI_API_KEY=your_gemini_api_key_here
-
 # OpenAI API Key
 OPENAI_API_KEY=your_openai_api_key_here
-
-# Anthropic API Key
-ANTHROPIC_API_KEY=your_anthropic_api_key_here
 ```
 
-The application will automatically:
-1. Detect available API keys in your `.env` file
-2. Set the default AI provider based on available keys
-3. Use the appropriate key for analysis
+2. When prompted, select option 1 for OpenAI.
 
-You can still override these defaults using command-line arguments.
+### 2. Azure/GitHub Models API
 
-### Using Command Line Arguments
+To use Azure's AI models via the GitHub Models API:
 
-#### Google Gemini
+1. Add your Azure/GitHub API key to the `.env` file:
 
-```bash
-python main.py urls.csv --api-key YOUR_GEMINI_API_KEY --api-type gemini
+```
+# Azure/GitHub Models API Key
+AZURE_GITHUB_API_KEY=your_azure_github_api_key_here
 ```
 
-#### OpenAI
+2. When prompted, select option 2 for Azure.
 
-```bash
-python main.py urls.csv --api-key YOUR_OPENAI_API_KEY --api-type openai
-```
-
-#### Anthropic Claude
-
-```bash
-python main.py urls.csv --api-key YOUR_ANTHROPIC_API_KEY --api-type anthropic
-```
+The application will:
+1. Prompt you to choose between available AI providers
+2. Verify that the required API key is present in the `.env` file
+3. Initialize the selected AI client for analysis
 
 ## 🤝 Contributing
 
@@ -190,28 +195,19 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## 📂 Project Structure
 
-PainPoint.er Scraper has been modularized for better maintainability and extensibility:
+PainPoint.er Scraper has a modular architecture for maintainability and extensibility:
 
 ```
 ├── main.py                 # Main entry point script
+├── config.py               # Configuration loading and validation
+├── utils.py                # Utility functions (file I/O, URL parsing)
+├── scraper.py              # Reddit scraping functionality
+├── ai_clients.py           # AI provider client implementations
+├── analysis.py             # Text analysis and processing
 ├── requirements.txt        # Python dependencies
-├── sample_urls.csv         # Example input file
-└── src/                    # Source code modules
-    ├── painpointer.py      # Core PainPointerSearch class
-    ├── url_processor.py    # URL processing and normalization
-    ├── scrapers.py         # Platform-specific web scrapers
-    ├── data_analyzer.py    # Analysis and AI integration
-    └── output_manager.py   # Results formatting and export
+├── .env.example            # Example environment variables
+└── urls.csv                # Input file with URLs to analyze
 ```
-
-### Module Descriptions
-
-- **main.py**: Entry point that handles command-line arguments and runs the search process
-- **src/painpointer.py**: Core class that orchestrates the entire search and analysis workflow
-- **src/url_processor.py**: Handles CSV parsing and URL normalization
-- **src/scrapers.py**: Contains platform-specific scrapers for Reddit, Twitter, etc.
-- **src/data_analyzer.py**: Analyzes scraped data and integrates with AI APIs
-- **src/output_manager.py**: Formats and exports results to various file formats
 
 ## 📝 License
 
